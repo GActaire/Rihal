@@ -1,0 +1,15 @@
+{
+  "name": "Rihal",
+  "short_name": "Rihal",
+  "description": "Récite le Coran, compare-toi à al-Husary et corrige tes madds.",
+  "lang": "fr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef3f0",
+  "theme_color": "#0f6e56",
+  "icons": [
+    { "src": "logo192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "logo512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
