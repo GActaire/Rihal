@@ -1,5 +1,5 @@
 // Rihal — tout le calcul en arrière-plan : l'écran reste fluide.
-importScripts("engine.js?v=5");
+importScripts("engine.js?v=6");
 const E = self.MiroirEngine, SR = E.SR;
 const refs = new Map(); // "récitateur|verset" -> référence préparée
 let S = null;           // séance d'enregistrement en cours
@@ -114,7 +114,7 @@ function audio(native) {
   // 2) la voix n'avance plus depuis ~2 s : se recaler automatiquement
   const pf = t.posFrame;
   if (pf > S.lastPos + 3) { S.lastPos = pf; S.voicedAt = t.voicedFrames; }
-  else if (t.voicedFrames - S.voicedAt > 200 && t.voicedFrames - S.relockAt > 150 && t.frac < 0.95) {
+  else if (t.voicedFrames - S.voicedAt > 130 && t.voicedFrames - S.relockAt > 110 && t.frac < 0.95) {
     S.relockAt = t.voicedFrames;
     autoRelock();
     if (S.tracker !== t) return;

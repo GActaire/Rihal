@@ -465,7 +465,16 @@ function lastStart(ref, x) {
   const first = found[0];
   let pick = first;
   for (const f of found.slice(1)) if (f.cost <= first.cost * 1.05 && f.cost <= pick.cost * 1.1 && f.st > pick.st + 60) pick = f;
-  return pick === first ? 0 : Math.max(0, (pick.st - 15) * HOP);
+  if (pick === first) return 0;
+  const cut = Math.max(0, (pick.st - 15) * HOP);
+  // vrai faux départ seulement si ce qui précède ne couvrait pas déjà la majeure partie du verset
+  const L = F.a1 - F.a0;
+  const before = relock(ref, x.subarray(0, cut));
+  if (before && before.end > F.a0 + 0.85 * L) return 0;
+  // et ce qui suit doit couvrir tout le verset (sinon c'est juste un passage du texte qui se répète)
+  const after = relock(ref, x.subarray(cut));
+  if (!after || after.start > F.a0 + 0.15 * L || after.end < F.a0 + 0.85 * L) return 0;
+  return cut;
 }
 
 // Où l'élève en est-il ? Cherche un extrait de sa voix dans tout le verset de référence.
@@ -485,7 +494,8 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
   let prev = new Float32Array(n).fill(Infinity), cur = new Float32Array(n).fill(Infinity);
   let buf = new Float32Array(0), off = 0, total = 0;
   const fr = [], kAt = new Int32Array(n).fill(-1), chunks = [];
-  let started = -1, pos = 0, j = 0, peak = -200, floor = null, lastAct = -1, voiced = 0;
+  let started = -1, pos = 0, j = 0, peak = -200, floor = null, lastAct = -1, voiced = 0, stuck = 0;
+  const eHist = [];
   const mu = new Float32Array(D), m2 = new Float32Array(D); let nAct = 0;
   const done = new Set();
   const calibrated = !!(profile && profile.mu);
@@ -505,13 +515,15 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
     const u = new Float32Array(D);
     for (let d = 0; d < D; d++) { const sd = nAct > 20 ? Math.sqrt(m2[d] / nAct) + 1e-6 : 1; u[d] = (c[d] - mu[d]) / sd; }
     const lo = Math.max(0, pos - 60), hi = Math.min(n - 1, pos + 40);
+    // la voix est là mais le suivi n'avance plus : on pousse doucement vers la suite
+    const stay = 0.3 + Math.max(0, stuck - 45) * 0.04;
     cur.fill(Infinity);
     for (let i = lo; i <= hi; i++) {
       const d = cdist(F.cep[a0 + i], u);
       let best;
       if (j === 0) best = i <= 30 ? 0.05 * i : Infinity;
       else {
-        best = prev[i] + 0.3;
+        best = prev[i] + stay;
         if (i > 0 && prev[i - 1] < best) best = prev[i - 1];
         if (i > 1 && prev[i - 2] + 0.3 < best) best = prev[i - 2] + 0.3;
       }
@@ -519,7 +531,8 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
     }
     let bi = pos, bv = Infinity;
     for (let i = lo; i <= hi; i++) if (cur[i] < bv) { bv = cur[i]; bi = i; }
-    if (bi > pos) { const np = Math.min(bi, pos + 2); for (let i = pos + 1; i <= np; i++) kAt[i] = fr.length - 1; pos = np; }
+    if (bi > pos) { const np = Math.min(bi, pos + 2); for (let i = pos + 1; i <= np; i++) kAt[i] = fr.length - 1; pos = np; stuck = 0; }
+    else stuck++;
     const t = prev; prev = cur; cur = t;
     j++;
   }
@@ -537,6 +550,8 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
 
   // vérifie chaque madd déjà passé, sur une fenêtre autour de lui
   function checkMadds(final) {
+    // au tout début, trop peu de voix pour mesurer de façon fiable : on attend un peu
+    if (!final && !calibrated && voiced < 300) return;
     for (let idx = 0; idx < ref.targets.length; idx++) {
       const t = ref.targets[idx];
       if (!t.seg || !t.rLen || done.has(idx)) continue;
@@ -559,19 +574,26 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
       if (hi < 0) continue;
       const rw = runIn(maskBelow(F, rs, re, 0.75), s - 6, e + 6, 6).len || t.rLen;
       const u = runIn(softU, lo - 6, hi + 6, 6).len, ratio = u / (rw * R) / biasOf(bias, t.type);
-      onEvent({ type: "madd", idx, target: t, ratio, kind: judge(ratio, t.type), refS: sec(rw * R), usrS: sec(u) });
+      // en direct on ne signale que les écarts nets ; le bilan de fin de verset tranche le reste
+      const live = t.type === "arid" ? (ratio < 0.3 ? "court" : ratio > 2.4 ? "long" : "ok") : (ratio < 0.15 ? "ok" : ratio < 0.45 ? "court" : ratio > 2.1 ? "long" : "ok");
+      onEvent({ type: "madd", idx, target: t, ratio, kind: live, refS: sec(rw * R), usrS: sec(u) });
     }
   }
 
   function onFrame(f) {
-    peak = Math.max(peak, f.e);
+    // pic de voix robuste : un tapotement sur la tablette ne doit pas faire croire que la voix est trop faible
+    eHist.push(f.e); if (eHist.length > 5) eHist.shift();
+    const sm = eHist.slice().sort((p, q) => p - q)[eHist.length >> 1];
+    peak = Math.max(peak, sm);
     if (fr.length < 25 && !known) floor = floor === null ? f.e : Math.min(floor, f.e);
     const thr = known ? actThr(floor, peak) : Math.max((floor === null ? -100 : floor) + 12, peak - 38);
-    f.act = f.e > thr && fr.length >= 5;
     const k = fr.length;
+    f.act = f.e > thr - 2 && k >= 5;
+    // brefs creux de voix (consonnes douces) : on continue de suivre 80 ms
+    const hang = !f.act && started >= 0 && k - lastAct <= 8 && f.e > floor + 6;
     fr.push({ act: f.act });
     if (f.act) { lastAct = k; voiced++; if (started < 0) started = k; }
-    if (started >= 0 && f.act) step(f.c);
+    if (started >= 0 && (f.act || hang)) step(f.c);
     if (started < 0) return;
     if (k % 2 === 0) {
       const wp = wordAt(ref, a0 + pos);

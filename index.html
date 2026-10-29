@@ -175,6 +175,66 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .btn.primary{background:var(--m-accent);border-color:var(--m-accent);color:#fff}
 .btn[disabled]{opacity:.45;cursor:not-allowed}
 .empty{color:var(--m-muted);text-align:center;padding:20px 0}
+
+/* hifz */
+.hifz-card{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;text-align:left;border:0;border-radius:18px;padding:16px 18px;background:linear-gradient(135deg,var(--m-accent),#0b5442);color:#fff;cursor:pointer;font-size:14px}
+.hifz-card b{display:block;font-size:19px;font-weight:800}
+.hifz-card span{opacity:.92}
+.hc-stats{display:flex;flex-direction:column;align-items:flex-end;gap:2px;font-weight:700;white-space:nowrap}
+#hifz{padding-bottom:48px;display:flex;flex-direction:column;gap:12px}
+.h-title{font-weight:800;font-size:17px}
+.h-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.h-stat{background:var(--m-surface);border:1px solid var(--m-line);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column}
+.h-stat b{font-size:22px;font-weight:800;color:var(--m-accent);font-variant-numeric:tabular-nums}
+.h-stat span{font-size:12px;color:var(--m-muted);font-weight:600}
+.h-prog{height:10px;border-radius:999px;background:var(--m-surface);border:1px solid var(--m-line);overflow:hidden}
+.h-prog i{display:block;height:100%;background:var(--m-accent);border-radius:999px}
+.h-note{font-size:13px;color:var(--m-muted)}
+.h-tip{font-size:14px;background:var(--m-accent-soft);border-radius:12px;padding:12px 14px}
+.h-tip.warn{background:var(--m-short-soft)}
+.h-task{display:flex;justify-content:space-between;align-items:center;gap:12px;width:100%;text-align:left;background:var(--m-surface);border:1px solid var(--m-line);border-left:6px solid var(--m-accent);border-radius:14px;padding:12px 14px;cursor:pointer;color:var(--m-ink)}
+.h-task.m-sabqi{border-left-color:var(--m-short)} .h-task.m-manzil{border-left-color:var(--m-long)}
+.h-task-l{display:flex;flex-direction:column;min-width:0}
+.h-task b{font-size:16px}
+.h-kind{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--m-muted)}
+.h-sub{font-size:13px;color:var(--m-muted);font-weight:500}
+.h-go{flex:none;font-weight:800;color:var(--m-accent)}
+.h-list{display:flex;flex-direction:column;gap:8px}
+.h-sur{background:var(--m-surface);border:1px solid var(--m-line);border-radius:14px;padding:4px 12px}
+.h-sur summary{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 2px;cursor:pointer;list-style:none}
+.h-sur summary::-webkit-details-marker{display:none}
+.h-sur[open]{padding-bottom:12px}
+.h-sur .vrow{margin-top:6px;cursor:default}
+.btn.ghost{border:0;background:transparent;color:var(--m-muted);font-weight:600;margin-top:6px;padding:8px 0}
+.heat{display:grid;grid-template-rows:repeat(7,1fr);grid-auto-flow:column;grid-auto-columns:1fr;gap:3px;max-width:420px}
+.heat i{aspect-ratio:1;border-radius:3px;background:var(--m-line)}
+.heat i.lv1{background:color-mix(in srgb,var(--m-accent) 30%,var(--m-line))} .heat i.lv2{background:color-mix(in srgb,var(--m-accent) 55%,var(--m-line))} .heat i.lv3{background:color-mix(in srgb,var(--m-accent) 80%,var(--m-line))} .heat i.lv4{background:var(--m-accent)}
+.h-journal{display:flex;flex-direction:column;gap:6px}
+.h-day{font-size:13px;font-weight:800;color:var(--m-muted);margin-top:8px;text-transform:capitalize}
+.h-entry{display:flex;gap:10px;align-items:flex-start;background:var(--m-surface);border:1px solid var(--m-line);border-radius:12px;padding:10px 12px}
+.h-e-main{display:flex;flex-direction:column;min-width:0}
+.h-dot{flex:none;width:10px;height:10px;border-radius:50%;margin-top:6px;background:var(--m-accent)}
+.h-dot.m-sabqi{background:var(--m-short)} .h-dot.m-manzil{background:var(--m-long)} .h-dot.m-libre{background:var(--m-muted)}
+.h-method{background:var(--m-surface);border:1px solid var(--m-line);border-radius:14px;padding:12px 16px}
+.h-method summary{font-weight:700;cursor:pointer}
+.h-m-t{display:block;margin-top:12px}
+.h-m-p{font-size:14px;color:var(--m-ink);opacity:.85}
+.h-grades{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.h-grade{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;border:2px solid var(--m-line);background:var(--m-surface);color:var(--m-ink);border-radius:14px;padding:12px 14px;cursor:pointer}
+.h-grade b{font-size:17px} .h-grade span{font-size:13px;color:var(--m-muted)} .h-grade em{font-style:normal;font-size:12px;font-weight:700;color:var(--m-accent)}
+.h-grade.g0 b{color:var(--m-diff)} .h-grade.g1 b{color:var(--m-short)} .h-grade.g2 b{color:var(--m-ok)} .h-grade.g3 b{color:var(--m-accent)}
+.h-grade.sug{border-color:var(--m-accent);box-shadow:0 0 0 3px var(--m-accent-soft)}
+.hifz-bar{background:var(--m-surface);border:1px solid var(--m-line);border-radius:16px;padding:12px 14px;margin-bottom:12px;display:flex;flex-direction:column;gap:8px}
+.hb-top{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.hb-steps{display:flex;gap:4px;flex-wrap:wrap}
+.hb-step{font-size:12px;font-weight:700;border-radius:999px;padding:3px 10px;background:var(--m-bg);color:var(--m-muted)}
+.hb-step.on{background:var(--m-accent);color:#fff} .hb-step.done{background:var(--m-accent-soft);color:var(--m-accent)}
+.hb-text{font-size:14px}
+.w.out,.ve.out{opacity:.28}
+.pages.masked .w:not(.out):not(.on):not(.done):not(.peek) .t{color:transparent}
+.pages.masked .w:not(.out):not(.on):not(.done):not(.peek){background:var(--m-bg);box-shadow:inset 0 -2px 0 var(--m-line)}
+.pages.masked .w.peek .t{color:var(--m-short)}
+@media (max-width:560px){.h-stats{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:480px){.grid{grid-template-columns:1fr}.bar-row{grid-template-columns:64px 1fr 56px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -187,8 +247,9 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
         <g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"><rect x="13" y="13" width="38" height="38" rx="5"/><rect x="13" y="13" width="38" height="38" rx="5" transform="rotate(45 32 32)"/></g>
         <g fill="currentColor"><rect x="21.5" y="27" width="3" height="10" rx="1.5"/><rect x="26.5" y="22" width="3" height="20" rx="1.5"/><rect x="31.5" y="18" width="3" height="28" rx="1.5"/><rect x="36.5" y="23" width="3" height="18" rx="1.5"/><rect x="41.5" y="28" width="3" height="8" rx="1.5"/></g>
       </svg>
-      <div><h1>Rihal</h1><p class="tag">Récite, compare à al-Husary, corrige.</p></div>
+      <div><h1>Rihal</h1><p class="tag">Récite, corrige, mémorise.</p></div>
     </header>
+    <button id="hifzCard" class="hifz-card"></button>
     <div id="calibCard" class="calib">
       <div><b>Ma voix</b><span id="calibState">Pas encore étalonnée</span></div>
       <button id="calibBtn" class="btn primary">Étalonner</button>
@@ -203,6 +264,8 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     <p class="foot">Texte du Coran et minutage d'al-Husary : quran.com. Audios : everyayah.com.</p>
   </section>
 
+  <section id="hifz" class="view" hidden></section>
+
   <section id="surah" class="view" hidden>
     <header class="bar">
       <button id="back" class="icon-btn" aria-label="Toutes les sourates"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg></button>
@@ -210,6 +273,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
       <span id="sProg" class="bar-prog"></span>
     </header>
     <div id="calibBanner" class="calib-banner" hidden><b>Étalonnage en 2 étapes.</b> 1. Reste silencieux 3 secondes : l'application mesure le bruit autour de toi. 2. Récite Al-Fatiha puis Al-Kawthar, calmement, comme tu penses qu'elles doivent être récitées : elle apprend ton timbre, ton rythme et ta façon de tenir chaque type de madd. À la fin, tu reçois un rapport complet.</div>
+    <div id="hifzBar" class="hifz-bar" hidden></div>
     <div id="pages" class="pages"></div>
   </section>
 
@@ -231,6 +295,6 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     </div>
   </div>
 </div>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

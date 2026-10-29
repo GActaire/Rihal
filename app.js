@@ -36,7 +36,7 @@ const saveSettings = p => store.set("settings", { ...settings(), ...p });
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null;
-const worker = new Worker("worker.js?v=5");
+const worker = new Worker("worker.js?v=6");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -243,6 +243,7 @@ function renderHome() {
   const st = settings(), sel = $("recSel");
   if (!sel.options.length) RECITERS.forEach(r => { const o = el("option", null, r.name); o.value = r.id; sel.appendChild(o); });
   sel.value = st.rec; $("multi").checked = !!st.multi;
+  hifzCard();
   const v = store.get("voice", null), cs = $("calibState");
   cs.textContent = v ? `Voix étalonnée le ${new Date(v.profile.date).toLocaleDateString("fr-FR")}` : "Pas encore étalonnée";
   $("calibBtn").textContent = v ? "Refaire" : "Étalonner";
@@ -264,12 +265,15 @@ async function openSurah(id, calib) {
   for (const sid of sur) { const t = await loadText(sid); if (!t) { $("pages").textContent = ""; $("pages").appendChild(el("p", "empty", "Impossible de charger le texte. Vérifie ta connexion internet.")); return; } parts.push(t); }
   S = { id: calibMode ? 0 : id, sur, c, v: parts.flatMap(t => t.v.map(V => ({ ...V }))), recs: {} };
   results = new Array(S.v.length).fill(null); usrBufs = [];
+  H = !calibMode && pendingH && pendingH.s === id ? pendingH : null; pendingH = null;
+  if (H) { H.to = Math.min(H.to, S.v.length - 1); H.t0 = Date.now(); }
   const last = store.get("last", null);
-  cur = calibMode ? 0 : (last && last.s === id ? Math.min(last.v, S.v.length - 1) : 0);
+  cur = calibMode ? 0 : H ? (H.step === 2 ? H.link : H.from) : (last && last.s === id ? Math.min(last.v, S.v.length - 1) : 0);
   renderPages();
+  markRange(); hifzBar();
   updateRecChip();
   selectVerse(cur, !calibMode);
-  setStatus(calibMode ? "Étape 1 sur 2 : touche le micro, puis reste silencieux 3 secondes." : "Touche un mot pour choisir le verset de départ, puis le micro.");
+  setStatus(calibMode ? "Étape 1 sur 2 : touche le micro, puis reste silencieux 3 secondes." : H ? (H.step === 0 ? "Touche « Écouter »." : "Touche le micro quand tu es prêt.") : "Touche un mot pour choisir le verset de départ, puis le micro.");
 }
 function updateRecChip() { $("recLbl").textContent = recInfo(settings().rec).short; }
 
@@ -317,7 +321,7 @@ function selectVerse(vi, scroll) {
   wordEls.forEach(ws => ws.forEach(w => w.classList.remove("cv")));
   cur = Math.max(0, Math.min(S.v.length - 1, vi));
   wordEls[cur].forEach(w => w.classList.add("cv"));
-  if (!calibMode) store.set("last", { s: S.id, v: cur });
+  if (!calibMode && !H) store.set("last", { s: S.id, v: cur });
   if (scroll) wordEls[cur][0].scrollIntoView({ block: "center", behavior: "smooth" });
   updateProg();
   prepAround(cur);
@@ -370,7 +374,8 @@ async function playFrom(vi) {
   listen = { stop: false };
   setListenUi(true);
   const L = listen;
-  for (let v = vi; v < S.v.length && !L.stop; v++) {
+  const endV = H ? H.to : S.v.length - 1;
+  for (let v = vi; v <= endV && !L.stop; v++) {
     selectVerse(v, false);
     setStatus(`${recInfo(settings().rec).short} · verset ${S.v[v].n}`);
     const p = await prepVerse(v);
@@ -391,7 +396,11 @@ async function playFrom(vi) {
     });
     finishLight(v);
   }
-  if (listen === L) { listen = null; setListenUi(false); clearLight(); setStatus("Touche le micro pour réciter."); }
+  if (listen === L) {
+    listen = null; setListenUi(false); clearLight();
+    if (H && H.step === 0) { H.listens++; hifzBar(); setStatus(H.listens >= 3 ? "Bien écouté ✓. Passe à « Répéter » quand tu veux." : `Écoute ${H.listens}/3 terminée. Encore une fois ?`, "ok"); }
+    else setStatus("Touche le micro pour réciter.");
+  }
 }
 function setListenUi(on) {
   $("listenIco").setAttribute("d", on ? "M7 5h4v14H7zm6 0h4v14h-4z" : "M8 5v14l11-7z");
@@ -413,7 +422,7 @@ async function startRec() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setStatus("Ce navigateur ne donne pas accès au micro."); return; }
   btn.classList.add("busy"); setStatus("Préparation…");
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 } }); }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } }); }
   catch (e) { btn.classList.remove("busy"); setStatus("Le micro est refusé. Autorise-le pour ce site dans les réglages du navigateur."); return; }
   const src = c.createMediaStreamSource(stream);
   const mute = c.createGain(); mute.gain.value = 0; mute.connect(c.destination);
@@ -434,13 +443,16 @@ async function startRec() {
   }
   src.connect(node); node.connect(mute);
   btn.classList.remove("busy");
+  if (H) { if (!inRange(cur)) cur = H.step === 2 ? H.link : H.from; resetRange(); }
+  if (!S.t0) S.t0 = Date.now();
   rec = { stream, src, node, mute, vi: cur };
   clearLight();
   const voice = calibMode ? null : store.get("voice", null);
   const st = settings();
   prepAround(cur);
   const others = st.multi && !calibMode ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => r.id) : [];
-  const msg = { t: "start", keys: S.v.map((_, i) => keyOf(i, st.rec)), extra: S.v.map((_, i) => others.map(r => keyOf(i, r))), i: cur, rate: c.sampleRate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode };
+  const lim = H ? H.to + 1 : S.v.length;
+  const msg = { t: "start", keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: cur, rate: c.sampleRate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode };
   if (port) { msg.port = port; worker.postMessage(msg, [port]); } else worker.postMessage(msg);
   btn.classList.add("rec"); $("micIco").hidden = true; $("stopIco").hidden = false;
   $("restart").disabled = false;
@@ -455,7 +467,7 @@ function stopRec(fromWorker) {
   $("mic").classList.remove("rec"); $("micIco").hidden = false; $("stopIco").hidden = true;
   $("restart").disabled = true;
   veEls.forEach(v => v && v.classList.remove("st-run"));
-  if (!calibMode) setStatus("Arrêté. Touche « Bilan » pour voir tes corrections.");
+  if (!calibMode && !H) setStatus("Arrêté. Touche « Bilan » pour voir tes corrections.");
 }
 function stopAll() { stopListen(); if (rec) stopRec(); }
 
@@ -522,8 +534,8 @@ worker.onmessage = e => {
       markVerse(m.i);
       updateProg();
       const bad = res.items.filter(isBad).length;
-      if (rec && bad && !calibMode) setStatus(`Verset ${S.v[m.i].n} : ${bad} correction${bad > 1 ? "s" : ""}. Touche son numéro pour voir.`, "court");
-      if (!calibMode && results.every(Boolean)) { const d = store.get("done", {}); d[S.id] = 1; store.set("done", d); }
+      if (rec && bad && !calibMode && !(H && H.step === 2)) setStatus(`Verset ${S.v[m.i].n} : ${bad} correction${bad > 1 ? "s" : ""}. Touche son numéro pour voir.`, "court");
+      if (!calibMode && !H && results.every(Boolean)) { const d = store.get("done", {}); d[S.id] = 1; store.set("done", d); }
       break;
     }
     case "calib": {
@@ -535,7 +547,8 @@ worker.onmessage = e => {
     }
     case "finished":
       if (rec) stopRec(true);
-      if (!calibMode) setTimeout(() => { if (results.some(Boolean)) openReport(); }, 300);
+      if (H) setTimeout(hifzFinished, 300);
+      else if (!calibMode) { logFree(); setTimeout(() => { if (results.some(Boolean)) openReport(); }, 300); }
       break;
   }
 };
@@ -703,12 +716,356 @@ function showCalib(m) {
   body.appendChild(b);
 }
 
+/* ---------- mémorisation (hifz) : nouveau / révision récente / révision ancienne + répétition espacée ---------- */
+const DAY = 864e5;
+const dstr = (t = Date.now()) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const dnum = s => { const [y, m, d] = s.split("-").map(Number); return Math.round(new Date(y, m - 1, d).getTime() / DAY); };
+const addDays = (n, from) => dstr((from ? new Date(from.replace(/-/g, "/")).getTime() : Date.now()) + n * DAY + 3600e3);
+const LADDER = [1, 2, 4, 7];
+const GRADES = [["Oublié", "Je n'y arrivais pas sans aide"], ["Difficile", "Avec des hésitations"], ["Bien", "Quelques petites hésitations"], ["Facile", "Fluide, sans réfléchir"]];
+const hz = () => { const h = store.get("hifz", null) || {}; h.units = h.units || {}; h.log = h.log || []; return h; };
+const saveHz = h => { if (h.log.length > 2000) h.log = h.log.slice(-2000); store.set("hifz", h); };
+let H = null, pendingH = null;
+const surName = s => (chapters[s - 1] && chapters[s - 1].n) || "Sourate " + s;
+const unitLabel = u => `${surName(u.s)} · ${u.a === u.b ? "v. " + u.a : `v. ${u.a}–${u.b}`}`;
+const KIND = { learn: "Nouveau", queue: "À apprendre", sabqi: "Révision récente", manzil: "Révision ancienne" };
+
+async function addSurah(s, known) {
+  const t = await loadText(s); if (!t) return false;
+  const h = hz(); const groups = [];
+  t.v.forEach(V => { const g = groups[groups.length - 1]; if (g && g.p === V.p && g.vs.length < 20) g.vs.push(V.n); else groups.push({ p: V.p, vs: [V.n] }); });
+  const base = Date.now();
+  groups.forEach((g, i) => {
+    const id = `${s}-${g.vs[0]}`; if (h.units[id]) return;
+    const u = { id, s, a: g.vs[0], b: g.vs[g.vs.length - 1], p: g.p, step: 0, iv: 0, ease: 2, reps: 0, lapses: 0, added: dstr() };
+    if (known) Object.assign(u, { status: "manzil", iv: 14, due: addDays(1 + (Object.keys(h.units).length % 10)) });
+    else Object.assign(u, { status: "queue", order: base + i });
+    h.units[id] = u;
+  });
+  saveHz(h); return true;
+}
+
+function schedule(u, g) {
+  const fuzz = n => Math.max(1, Math.round(n * (0.92 + 0.16 * Math.random())));
+  u.reps++; u.last = dstr();
+  if (u.status === "learn" || u.status === "sabqi") {
+    if (g === 0) { u.status = u.status === "learn" ? "learn" : "sabqi"; u.step = 0; u.iv = 1; if (u.status === "sabqi") u.lapses++; }
+    else {
+      if (u.status === "learn") { u.status = "sabqi"; u.step = g === 3 ? 1 : 0; }
+      else if (g >= 2) u.step += g === 3 ? 2 : 1;
+      if (u.step >= LADDER.length) { u.status = "manzil"; u.iv = g === 3 ? 21 : 14; }
+      else u.iv = LADDER[u.step];
+    }
+  } else {
+    if (g === 0) { u.status = "sabqi"; u.step = 0; u.iv = 1; u.lapses++; u.ease = Math.max(1.3, u.ease - 0.2); }
+    else if (g === 1) { u.iv = Math.max(3, fuzz(u.iv * 1.2)); u.ease = Math.max(1.3, u.ease - 0.15); }
+    else if (g === 2) u.iv = fuzz(u.iv * u.ease);
+    else { u.iv = fuzz(u.iv * u.ease * 1.3); u.ease = Math.min(3, u.ease + 0.1); }
+    u.iv = Math.min(60, u.iv); // révision ancienne : tout repasse au moins tous les 2 mois
+  }
+  u.due = addDays(u.iv);
+  return u;
+}
+function previewIv(u, g) { const c = schedule(JSON.parse(JSON.stringify(u)), g); return c.iv; }
+
+function plan() {
+  const h = hz(), today = dstr(), us = Object.values(h.units);
+  const due = us.filter(u => (u.status === "sabqi" || u.status === "manzil") && u.due && u.due <= today).sort((a, b) => a.due < b.due ? -1 : a.due > b.due ? 1 : a.s - b.s || a.a - b.a);
+  const sabqi = due.filter(u => u.status === "sabqi"), manzil = due.filter(u => u.status === "manzil");
+  let fresh = us.find(u => u.status === "learn" && (!u.due || u.due <= today)) || null;
+  const learnedToday = h.log.some(e => e.mode === "nouveau" && dstr(e.t) === today && e.g > 0);
+  let held = false;
+  if (!fresh && !learnedToday && !us.some(u => u.status === "learn")) {
+    const q = us.filter(u => u.status === "queue").sort((a, b) => a.order - b.order)[0];
+    if (q) { if (due.length > 15) held = true; else fresh = q; }
+  }
+  return { fresh, sabqi, manzil, held, learnedToday, h };
+}
+
+function stats(h) {
+  const us = Object.values(h.units), mem = us.filter(u => u.status === "sabqi" || u.status === "manzil");
+  const verses = mem.reduce((s, u) => s + u.b - u.a + 1, 0);
+  const days = new Set(h.log.map(e => dstr(e.t)));
+  let streak = 0, d = dstr(); if (!days.has(d)) d = addDays(-1);
+  while (days.has(d)) { streak++; d = addDays(-1, d); }
+  const wk = h.log.filter(e => Date.now() - e.t < 7 * DAY).reduce((s, e) => s + (e.min || 0), 0);
+  return { verses, units: mem.length, streak, wk: Math.round(wk), pages: new Set(mem.map(u => u.p)).size };
+}
+
+function hifzCard() {
+  const box = $("hifzCard"); if (!box) return;
+  const { fresh, sabqi, manzil } = plan(), st = stats(hz());
+  box.textContent = "";
+  const t = el("div"); t.appendChild(el("b", null, "Mon hifz"));
+  const todo = sabqi.length + manzil.length + (fresh ? 1 : 0);
+  t.appendChild(el("span", null, todo ? `Aujourd'hui : ${todo} portion${todo > 1 ? "s" : ""} à réciter` : st.units ? "Rien à réviser aujourd'hui ✓" : "Commence ton programme de mémorisation"));
+  box.appendChild(t);
+  const r = el("div", "hc-stats");
+  r.appendChild(el("span", null, `🔥 ${st.streak} j`)); r.appendChild(el("span", null, `${st.verses} versets`));
+  box.appendChild(r);
+  box.onclick = () => { location.hash = "hifz"; };
+}
+
+function heat(h) {
+  const per = {}; h.log.forEach(e => { const k = dstr(e.t); per[k] = (per[k] || 0) + (e.min || 1); });
+  const g = el("div", "heat"); const today = new Date(); const offset = (today.getDay() + 6) % 7;
+  const n = 7 * 12 + offset + 1;
+  for (let i = n - 1; i >= 0; i--) {
+    const k = dstr(Date.now() - i * DAY), v = per[k] || 0;
+    const c = el("i", "lv" + (v === 0 ? 0 : v < 10 ? 1 : v < 25 ? 2 : v < 45 ? 3 : 4)); c.title = `${k} : ${Math.round(v)} min`;
+    g.appendChild(c);
+  }
+  return g;
+}
+
+function renderHifz() {
+  const v = $("hifz"); v.textContent = "";
+  const bar = el("header", "bar");
+  const back = el("button", "icon-btn"); back.setAttribute("aria-label", "Accueil"); back.innerHTML = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>'; back.onclick = () => { location.hash = ""; };
+  bar.appendChild(back); const tt = el("div", "bar-title"); tt.appendChild(el("span", "h-title", "Mon hifz")); tt.appendChild(el("span", "ar-name", "حِفْظ")); bar.appendChild(tt); bar.appendChild(el("span"));
+  v.appendChild(bar);
+  const P = plan(), h = P.h, st = stats(h);
+  const sr = el("div", "h-stats");
+  [[`${st.streak}`, "jours d'affilée"], [`${st.verses}`, "versets mémorisés"], [`${st.pages}`, "pages"], [`${st.wk} min`, "cette semaine"]].forEach(([a, b]) => { const c = el("div", "h-stat"); c.appendChild(el("b", null, a)); c.appendChild(el("span", null, b)); sr.appendChild(c); });
+  v.appendChild(sr);
+  const pr = el("div", "h-prog"); const fill = el("i"); fill.style.width = Math.max(0.5, st.verses / 6236 * 100).toFixed(2) + "%"; pr.appendChild(fill);
+  v.appendChild(pr); v.appendChild(el("p", "h-note", `${(st.verses / 6236 * 100).toFixed(1).replace(".", ",")} % du Coran · ${st.verses} / 6236 versets`));
+
+  v.appendChild(el("h3", "sub-h", "Aujourd'hui"));
+  const row = (u, mode, note) => {
+    const b = el("button", "h-task m-" + mode);
+    const l = el("span", "h-task-l"); l.appendChild(el("span", "h-kind", mode === "nouveau" ? "1 · Nouveau" : mode === "sabqi" ? "2 · Révision récente" : "3 · Révision ancienne"));
+    l.appendChild(el("b", null, unitLabel(u))); l.appendChild(el("span", "h-sub", note));
+    b.appendChild(l); b.appendChild(el("span", "h-go", "Commencer"));
+    b.onclick = () => startHifz(u.id, mode);
+    v.appendChild(b);
+  };
+  if (P.fresh) row(P.fresh, "nouveau", `page ${P.fresh.p} · écouter, répéter, puis réciter de mémoire`);
+  else if (P.held) v.appendChild(el("p", "h-tip", "Pas de nouvelle portion aujourd'hui : tu as beaucoup de révisions en retard. Les maîtres du hifz le disent : on n'ajoute pas tant que l'ancien n'est pas solide."));
+  else if (P.learnedToday) v.appendChild(el("p", "h-tip", "Nouvelle portion du jour apprise ✓. La suivante sera proposée demain."));
+  P.sabqi.forEach(u => row(u, "sabqi", `revue n° ${u.step + 1} · récite de mémoire`));
+  P.manzil.forEach(u => row(u, "manzil", `tous les ${u.iv} jours environ · récite de mémoire`));
+  if (!P.fresh && !P.sabqi.length && !P.manzil.length && !P.held && !P.learnedToday) v.appendChild(el("p", "h-tip", Object.keys(h.units).length ? "Tout est à jour. Tu peux réciter librement ou ajouter une sourate." : "Ajoute une première sourate ci-dessous. Commence petit : une sourate courte de Juz ʿAmma, par exemple."));
+
+  v.appendChild(el("h3", "sub-h", "Ajouter une sourate"));
+  const add = el("div", "settings");
+  const sel = el("select"); chapters.forEach(c => { const o = el("option", null, `${c.id}. ${c.n}`); o.value = c.id; sel.appendChild(o); }); sel.value = 114;
+  const lab = el("label", "field"); lab.appendChild(el("span", null, "Sourate")); lab.appendChild(sel); add.appendChild(lab);
+  const acts = el("div", "acts");
+  const b1 = el("button", "btn primary", "À apprendre"), b2 = el("button", "btn", "Je la connais déjà");
+  const go = async known => { b1.disabled = b2.disabled = true; const ok = await addSurah(+sel.value, known); if (!ok) { b1.disabled = b2.disabled = false; alertMsg(add, "Impossible de charger cette sourate. Vérifie ta connexion."); return; } renderHifz(); };
+  b1.onclick = () => go(false); b2.onclick = () => go(true);
+  acts.appendChild(b1); acts.appendChild(b2); add.appendChild(acts);
+  add.appendChild(el("p", "h-note", "« Je la connais déjà » la place directement en révision ancienne, étalée sur les prochains jours."));
+  v.appendChild(add);
+
+  const us = Object.values(h.units);
+  if (us.length) {
+    v.appendChild(el("h3", "sub-h", "Mon programme"));
+    const bySur = new Map(); us.forEach(u => { if (!bySur.has(u.s)) bySur.set(u.s, []); bySur.get(u.s).push(u); });
+    const list = el("div", "h-list");
+    [...bySur.entries()].sort((a, b) => a[0] - b[0]).forEach(([s, arr]) => {
+      arr.sort((a, b) => a.a - b.a);
+      const d = el("details", "h-sur"); const sm = el("summary");
+      const memd = arr.filter(u => u.status === "sabqi" || u.status === "manzil").length;
+      sm.appendChild(el("b", null, `${s}. ${surName(s)}`)); sm.appendChild(el("span", "pill " + (memd === arr.length ? "ok" : "warn"), `${memd}/${arr.length} portion${arr.length > 1 ? "s" : ""}`));
+      d.appendChild(sm);
+      arr.forEach(u => {
+        const r = el("div", "vrow h-unit"); const l = el("span"); l.appendChild(el("b", null, u.a === u.b ? `v. ${u.a}` : `v. ${u.a}–${u.b}`)); l.appendChild(el("span", "h-sub", ` · ${KIND[u.status]}${u.due && u.status !== "queue" ? " · prochaine : " + fmtDay(u.due) : ""}`));
+        r.appendChild(l);
+        const bt = el("button", "btn", u.status === "queue" ? "Apprendre" : "Réciter");
+        bt.onclick = e => { e.stopPropagation(); startHifz(u.id, u.status === "queue" || u.status === "learn" ? "nouveau" : u.status); };
+        r.appendChild(bt); d.appendChild(r);
+      });
+      const rm = el("button", "btn ghost", "Retirer cette sourate du programme");
+      rm.onclick = () => { if (!confirm(`Retirer ${surName(s)} du programme ? Ton journal est conservé.`)) return; const hh = hz(); Object.keys(hh.units).forEach(k => { if (hh.units[k].s === s) delete hh.units[k]; }); saveHz(hh); renderHifz(); };
+      d.appendChild(rm);
+      list.appendChild(d);
+    });
+    v.appendChild(list);
+  }
+
+  v.appendChild(el("h3", "sub-h", "Journal"));
+  v.appendChild(heat(h));
+  const jl = el("div", "h-journal");
+  const recent = h.log.slice(-60).reverse();
+  if (!recent.length) jl.appendChild(el("p", "empty", "Ton activité apparaîtra ici après ta première séance."));
+  let lastDay = "";
+  recent.forEach(e => {
+    const dd = dstr(e.t);
+    if (dd !== lastDay) { jl.appendChild(el("div", "h-day", fmtDay(dd, true))); lastDay = dd; }
+    const r = el("div", "h-entry");
+    const lbl = { nouveau: "Nouveau", sabqi: "Révision récente", manzil: "Révision ancienne", libre: "Récitation libre" }[e.mode] || e.mode;
+    r.appendChild(el("span", "h-dot m-" + e.mode));
+    const c = el("span", "h-e-main"); c.appendChild(el("b", null, `${lbl} · ${surName(e.s)} ${e.a === e.b ? e.a : e.a + "–" + e.b}`));
+    const bits = [`${Math.max(1, Math.round(e.min || 0))} min`];
+    if (e.hints != null) bits.push(e.hints ? `${e.hints} indice${e.hints > 1 ? "s" : ""}` : "sans indice");
+    if (e.madd) bits.push(`${e.madd} madd à corriger`);
+    if (e.diff) bits.push(`${e.diff} passage${e.diff > 1 ? "s" : ""} hésitant${e.diff > 1 ? "s" : ""}`);
+    if (e.g != null) bits.push(GRADES[e.g][0]);
+    c.appendChild(el("span", "h-sub", bits.join(" · "))); r.appendChild(c);
+    jl.appendChild(r);
+  });
+  v.appendChild(jl);
+
+  v.appendChild(el("h3", "sub-h", "La méthode"));
+  const m = el("details", "h-method"); m.appendChild(el("summary", null, "Comment Rihal t'aide à mémoriser"));
+  [
+    ["Chaque jour, trois parts (méthode des écoles coraniques)", "1. Nouveau (sabaq) : une petite portion, souvent une page ou une sourate courte. 2. Révision récente (sabqi) : ce que tu as appris ces derniers jours. 3. Révision ancienne (manzil) : tout le reste, en boucle. La révision passe avant l'ajout : si elle prend du retard, Rihal met le nouveau en pause."],
+    ["Écouter avant de réciter", "On apprend d'abord à l'oreille, auprès d'un récitateur fiable (c'est l'idée du talaqqi). Écoute la portion au moins 3 fois en suivant le texte des yeux."],
+    ["Répéter jusqu'à une lecture sans faute", "Récite avec le texte jusqu'à obtenir une lecture propre : Rihal vérifie tes madds à chaque passage. La répétition fixe la portion, le tajwid correct dès le début évite d'apprendre une erreur."],
+    ["Réciter de mémoire (rappel actif)", "Le texte se cache. Le mot n'apparaît que quand tu l'as dit. Bloqué ? Touche le mot caché : c'est un indice, compté dans le bilan. Chercher dans sa mémoire, même avec effort, ancre bien mieux que relire (c'est l'effet de test, très utilisé en médecine)."],
+    ["Relier les portions (rabt)", "Pour une nouvelle portion, la récitation de mémoire reprend le dernier verset de la portion précédente, pour que les pages s'enchaînent."],
+    ["Revoir au bon moment (répétition espacée)", "Après chaque récitation, dis comment ça s'est passé. Rihal programme la prochaine révision : le lendemain, puis à 2, 4 et 7 jours, puis de plus en plus espacée selon ta réussite, sans jamais dépasser 2 mois. Une portion oubliée revient en révision quotidienne."],
+    ["Conseils des maîtres", "Toujours le même mushaf (la mémoire visuelle de la page aide), un moment fixe (beaucoup conseillent après Fajr), réciter ce qu'on a appris dans ses prières, comprendre le sens des versets, et faire vérifier sa récitation par un professeur quand c'est possible."]
+  ].forEach(([a, b]) => { m.appendChild(el("b", "h-m-t", a)); m.appendChild(el("p", "h-m-p", b)); });
+  v.appendChild(m);
+
+  v.appendChild(el("h3", "sub-h", "Sauvegarde"));
+  const sv = el("div", "settings");
+  sv.appendChild(el("p", "h-note", "Ton programme est enregistré sur cet appareil seulement. Exporte-le de temps en temps pour ne pas le perdre, ou pour le transférer sur un autre appareil."));
+  const sa = el("div", "acts");
+  const ex = el("button", "btn", "Exporter"), im = el("button", "btn", "Importer");
+  const fi = el("input"); fi.type = "file"; fi.accept = "application/json,.json"; fi.hidden = true;
+  ex.onclick = () => { const blob = new Blob([JSON.stringify({ app: "rihal", v: 1, hifz: hz() })], { type: "application/json" }); const a = el("a"); a.href = URL.createObjectURL(blob); a.download = `rihal-hifz-${dstr()}.json`; document.body.appendChild(a); a.click(); a.remove(); };
+  im.onclick = () => fi.click();
+  fi.onchange = async () => {
+    const f = fi.files[0]; if (!f) return;
+    try { const j = JSON.parse(await f.text()); const d = j.hifz || j; if (!d.units || !d.log) throw 0; if (!confirm("Remplacer ton programme actuel par cette sauvegarde ?")) return; saveHz(d); renderHifz(); }
+    catch (_) { alertMsg(sv, "Ce fichier n'est pas une sauvegarde Rihal."); }
+  };
+  sa.appendChild(ex); sa.appendChild(im); sv.appendChild(sa); sv.appendChild(fi);
+  v.appendChild(sv);
+}
+function alertMsg(box, t) { const p = el("p", "h-tip warn", t); box.appendChild(p); setTimeout(() => p.remove(), 5000); }
+function fmtDay(d, long) {
+  const t = dstr(), diff = dnum(d) - dnum(t);
+  if (diff === 0) return "aujourd'hui"; if (diff === 1) return "demain"; if (diff === -1) return "hier";
+  const dt = new Date(d.replace(/-/g, "/"));
+  return dt.toLocaleDateString("fr-FR", long ? { weekday: "long", day: "numeric", month: "long" } : { day: "numeric", month: "short" });
+}
+
+function startHifz(id, mode) {
+  const h = hz(), u = h.units[id]; if (!u) return;
+  const isNew = mode === "nouveau";
+  let link = u.a;
+  if (isNew) {
+    const prev = Object.values(h.units).filter(x => x.s === u.s && x.b === u.a - 1 && (x.status === "sabqi" || x.status === "manzil"))[0];
+    if (prev) link = u.a - 1;
+  }
+  pendingH = { id, s: u.s, mode, from: u.a - 1, to: u.b - 1, link: link - 1, step: isNew ? 0 : 2, listens: 0, passes: 0, clean: 0, hints: new Set(), t0: Date.now() };
+  if (location.hash === "#s" + u.s) openSurah(u.s); else location.hash = "s" + u.s;
+}
+
+const STEPS_NEW = ["Écouter", "Répéter", "De mémoire"];
+function hifzBar() {
+  const b = $("hifzBar"); if (!H) { b.hidden = true; $("pages").classList.remove("masked"); return; }
+  b.hidden = false; b.textContent = "";
+  const top = el("div", "hb-top");
+  top.appendChild(el("b", null, `${H.mode === "nouveau" ? "Nouveau" : H.mode === "sabqi" ? "Révision récente" : "Révision ancienne"} · v. ${H.from + 1}–${H.to + 1}`));
+  if (H.mode === "nouveau") { const st = el("div", "hb-steps"); STEPS_NEW.forEach((s, i) => st.appendChild(el("span", "hb-step" + (i === H.step ? " on" : i < H.step ? " done" : ""), `${i + 1}. ${s}`))); top.appendChild(st); }
+  b.appendChild(top);
+  const txt = H.step === 0 ? `Touche « Écouter » et suis le texte des yeux. Écoute au moins 3 fois (${H.listens}/3).`
+    : H.step === 1 ? `Récite avec le texte sous les yeux. Objectif : une lecture sans faute (${H.passes} lecture${H.passes > 1 ? "s" : ""}, ${H.clean} sans faute).`
+    : `Texte caché : récite de mémoire${H.link < H.from ? `, en commençant par le verset ${H.link + 1} pour relier à la portion d'avant` : ""}. Bloqué ? Touche le mot caché pour le voir.`;
+  b.appendChild(el("p", "hb-text", txt));
+  const acts = el("div", "acts");
+  if (H.mode === "nouveau" && H.step > 0) { const p = el("button", "btn", "← Étape précédente"); p.onclick = () => setHStep(H.step - 1); acts.appendChild(p); }
+  if (H.step < 2) { const n = el("button", "btn primary", H.step === 0 ? "J'ai écouté → Répéter" : "Je suis prêt → De mémoire"); n.onclick = () => setHStep(H.step + 1); acts.appendChild(n); }
+  else { const pk = el("button", "btn", "Tout montrer un instant"); pk.onclick = () => { $("pages").classList.remove("masked"); H.peeked = true; setTimeout(() => { if (H && H.step === 2) $("pages").classList.add("masked"); }, 2500); }; acts.appendChild(pk); }
+  b.appendChild(acts);
+  $("pages").classList.toggle("masked", H.step === 2);
+}
+function setHStep(n) {
+  if (!H) return; stopAll();
+  H.step = n; H.hints = new Set(); resetRange(); clearLight(); hifzBar();
+  selectVerse(n === 2 ? H.link : H.from, true);
+  setStatus(n === 0 ? "Touche « Écouter »." : "Touche le micro quand tu es prêt.");
+}
+function inRange(vi) { return H && vi >= Math.min(H.link, H.from) && vi <= H.to; }
+function markRange() {
+  wordEls.forEach((ws, vi) => ws.forEach(w => w.classList.toggle("out", !!H && !inRange(vi))));
+  veEls.forEach((v, vi) => v && v.classList.toggle("out", !!H && !inRange(vi)));
+}
+function resetRange() {
+  if (!H) return;
+  for (let vi = Math.min(H.link, H.from); vi <= H.to; vi++) {
+    results[vi] = null; usrBufs[vi] = null;
+    (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff", "peek"); const s = w.querySelector("sup"); if (s) s.remove(); });
+    if (veEls[vi]) veEls[vi].classList.remove("st-ok", "st-warn");
+  }
+  updateProg();
+}
+function rangeStats() {
+  let madd = 0, diff = 0, done = 0, n = 0;
+  for (let vi = Math.min(H.link, H.from); vi <= H.to; vi++) { n++; const r = results[vi]; if (!r) continue; done++; r.items.forEach(it => { if (it.kind === "diff") diff++; else if (it.kind === "court" || it.kind === "long") madd++; }); }
+  return { madd, diff, done, n };
+}
+function logEntry(e) { const h = hz(); h.log.push({ t: Date.now(), ...e }); saveHz(h); }
+
+function hifzFinished() {
+  if (!H) return;
+  const r = rangeStats();
+  if (H.step === 1) {
+    if (!r.done) return;
+    H.passes++; if (!r.madd && !r.diff && r.done === r.n) H.clean++;
+    hifzBar();
+    setStatus(r.madd || r.diff ? `Lecture ${H.passes} : ${r.madd + r.diff} point${r.madd + r.diff > 1 ? "s" : ""} à corriger. Regarde les mots colorés, puis recommence.` : r.done < r.n ? `Lecture ${H.passes} : ${r.done} verset${r.done > 1 ? "s" : ""} sur ${r.n}. Va jusqu'au bout de la portion.` : `Lecture ${H.passes} sans faute ✓. Encore une fois, ou passe à « De mémoire ».`, r.madd || r.diff ? "court" : "ok");
+    return;
+  }
+  if (H.step !== 2 || !r.done) return;
+  const hints = H.hints.size + (H.peeked ? 3 : 0);
+  const sug = hints >= Math.max(3, r.n) || r.done < r.n * 0.5 ? 0 : hints || r.diff ? 1 : 2;
+  const h = hz(), u = h.units[H.id]; if (!u) return;
+  const body = openSheet("Comment ça s'est passé ?");
+  const sc = el("div", "score " + (sug >= 2 ? "good" : "warn"));
+  sc.appendChild(el("div", "score-main", `${r.done}/${r.n} versets récités de mémoire`));
+  const bits = [hints ? `${hints} indice${hints > 1 ? "s" : ""}` : "aucun indice", r.diff ? `${r.diff} passage${r.diff > 1 ? "s" : ""} hésitant${r.diff > 1 ? "s" : ""} ou sauté${r.diff > 1 ? "s" : ""}` : "aucun passage sauté", r.madd ? `${r.madd} madd à corriger` : "madds bien tenus"];
+  sc.appendChild(el("div", "score-sub", bits.join(" · ")));
+  body.appendChild(sc);
+  body.appendChild(el("p", "fix", `Note ta récitation honnêtement : Rihal s'en sert pour choisir le jour de la prochaine révision. Suggestion : « ${GRADES[sug][0]} ».`));
+  const g = el("div", "h-grades");
+  GRADES.forEach(([lab, sub], k) => {
+    const b = el("button", "h-grade g" + k + (k === sug ? " sug" : ""));
+    if (u.status === "queue") u.status = "learn";
+    const iv = previewIv(u, k);
+    b.appendChild(el("b", null, lab)); b.appendChild(el("span", null, sub)); b.appendChild(el("em", null, iv <= 1 ? "revient demain" : `revient dans ${iv} j`));
+    b.onclick = () => {
+      const hh = hz(), uu = hh.units[H.id]; if (uu.status === "queue") uu.status = "learn";
+      schedule(uu, k); saveHz(hh);
+      logEntry({ s: H.s, a: H.from + 1, b: H.to + 1, mode: H.mode, min: Math.min(120, (Date.now() - H.t0) / 6e4), hints, madd: r.madd, diff: r.diff, g: k });
+      closeSheet(); H = null; if (S) S.t0 = 0; location.hash = "hifz";
+    };
+    g.appendChild(b);
+  });
+  body.appendChild(g);
+  const again = el("button", "btn", "Recommencer de mémoire"); again.onclick = () => { closeSheet(); H.peeked = false; setHStep(2); };
+  body.appendChild(again);
+}
+
+function logFree() {
+  if (!S || H || calibMode || !S.t0) return;
+  const done = results.map((r, i) => r ? i : -1).filter(i => i >= 0 && !(S.logged || new Set()).has(i));
+  if (!done.length) return;
+  S.logged = S.logged || new Set(); done.forEach(i => S.logged.add(i));
+  let madd = 0, diff = 0; done.forEach(i => results[i].items.forEach(it => { if (it.kind === "diff") diff++; else if (it.kind === "court" || it.kind === "long") madd++; }));
+  logEntry({ s: S.id, a: S.v[done[0]].n, b: S.v[done[done.length - 1]].n, mode: "libre", min: Math.min(120, (Date.now() - S.t0) / 6e4), madd, diff });
+  S.t0 = Date.now();
+}
+
 /* ---------- navigation ---------- */
 function route() {
+  logFree();
   const m = location.hash.match(/^#s(\d+)$/);
+  $("hifz").hidden = true;
   if (m) openSurah(+m[1]);
-  else if (location.hash === "#etalonnage") openSurah(1, true);
-  else { stopAll(); S = null; calibMode = false; $("surah").hidden = true; $("dock").hidden = true; closeSheet(); $("home").hidden = false; renderHome(); window.scrollTo(0, 0); }
+  else if (location.hash === "#etalonnage") { pendingH = null; openSurah(1, true); }
+  else {
+    stopAll(); S = null; H = null; calibMode = false; $("surah").hidden = true; $("dock").hidden = true; closeSheet(); $("hifzBar").hidden = true;
+    if (location.hash === "#hifz") { $("home").hidden = true; $("hifz").hidden = false; renderHifz(); }
+    else { $("home").hidden = false; renderHome(); }
+    window.scrollTo(0, 0);
+  }
 }
 
 $("q").addEventListener("input", renderHome);
@@ -719,11 +1076,15 @@ $("pages").addEventListener("click", e => {
   if (ve) { const vi = +ve.dataset.v; if (results[vi]) openVerse(vi); else if (rec) worker.postMessage({ t: "goto", i: vi, w: 0 }); else selectVerse(vi); return; }
   const w = e.target.closest(".w");
   if (!w) return;
+  if (H && H.step === 2 && !w.classList.contains("done") && !w.classList.contains("on") && !w.classList.contains("peek") && inRange(+w.dataset.v)) {
+    w.classList.add("peek"); H.hints.add(w.dataset.v + ":" + w.dataset.w);
+    if (!rec) return;
+  }
   if (rec && !(calibMode && !rec.calibGo)) { worker.postMessage({ t: "goto", i: +w.dataset.v, w: +w.dataset.w }); return; }
   if (!listen && !calibMode) { selectVerse(+w.dataset.v); setStatus(`Départ : verset ${S.v[+w.dataset.v].n}. Touche le micro ou Écouter.`); }
 });
 $("mic").addEventListener("click", () => rec ? stopRec() : startRec());
-$("listen").addEventListener("click", () => listen ? stopListen() : (S && playFrom(cur)));
+$("listen").addEventListener("click", () => listen ? stopListen() : (S && playFrom(H ? (cur >= H.from && cur <= H.to ? cur : H.from) : cur)));
 $("report").addEventListener("click", openReport);
 $("restart").addEventListener("click", () => { if (rec) worker.postMessage({ t: "restart" }); });
 $("recBtn").addEventListener("click", openRecPicker);
