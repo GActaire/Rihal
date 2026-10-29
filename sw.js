@@ -1,6 +1,6 @@
 // Rihal — fonctionne hors ligne une fois ouvert
-const CACHE = "rihal-v4";
-const SHELL = ["./", "index.html", "app.js?v=4", "worker.js?v=4", "engine.js?v=4", "manifest.json", "favicon.svg", "logo192.png", "logo512.png"];
+const CACHE = "rihal-v5";
+const SHELL = ["./", "index.html", "app.js?v=5", "worker.js?v=5", "engine.js?v=5", "manifest.json", "favicon.svg", "logo192.png", "logo512.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener("activate", e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))));

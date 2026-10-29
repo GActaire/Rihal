@@ -210,6 +210,21 @@ function dtw(A, B, a0, a1, b0, b1) {
   return path;
 }
 
+function wordTempo(path, ref, A0) {
+  const r2u = new Map();
+  for (const [i, j] of path) { if (!r2u.has(i)) r2u.set(i, [j, j]); else r2u.get(i)[1] = j; }
+  const rs = [];
+  for (const [s0, e0] of ref.wt || []) {
+    const s = Math.round(s0), e = Math.round(e0);
+    if (s < A0 || e > ref.F.a1 || e - s < 8) continue;
+    const a = r2u.get(s), b = r2u.get(e);
+    if (a && b && b[1] > a[0]) rs.push((b[1] - a[0]) / (e - s));
+  }
+  if (rs.length < 3) return null;
+  rs.sort((x, y) => x - y);
+  return Math.min(2.5, Math.max(0.4, rs[Math.floor(rs.length / 2)]));
+}
+
 function pathTempo(path, a0, a1) {
   const span = a1 - a0, lo = a0 + 0.1 * span, hi = a0 + 0.9 * span;
   let jl = null, jh = null;
@@ -234,6 +249,7 @@ function letters(word) {
 // Retourne [{w, type, at, syl}] pour un verset (mots sans le numéro de fin).
 function detectMadds(words) {
   const res = [];
+  words = words.map(w => w.replace(/\u0622/g, "\u0627\u0653")); // آ = alif + madda
   words.forEach((word, wi) => {
     const L = letters(word), nb = L.length;
     const nextStartsWasl = wi + 1 < words.length && words[wi + 1][0] === "ٱ";
@@ -315,7 +331,9 @@ function prepareRef(x, madds, wordTimes, nWords) {
     targets = segs.filter(([s, e]) => e - s + 1 >= 2.1 * unit).map(seg => ({ w: -1, type: "gen", seg }));
   }
   for (const t of targets) if (t.seg) t.rLen = runIn(soft, t.seg[0] - 6, t.seg[1] + 6, 6).len;
-  const ref = { F, mask, soft, segs, unit, targets, wt, nWords: nWords || wt.length };
+  const tab = targets.filter(t => t.type === "tabii" && t.rLen).map(t => t.rLen);
+  const haraka = Math.min(22, Math.max(10, tab.length ? percentile(tab, 0.5) / 3 : 14));
+  const ref = { F, mask, soft, segs, unit, targets, wt, nWords: nWords || wt.length, haraka };
   for (const t of targets) if ((t.w == null || t.w < 0) && t.seg) t.w = wordAt(ref, (t.seg[0] + t.seg[1]) / 2).w;
   return ref;
 }
@@ -333,10 +351,12 @@ function wordAt(ref, f) {
   return { w: wt.length - 1, f: 1 };
 }
 
+// Jugement d'un madd : rapport des durées, et écart en temps (harakat) quand il est connu.
 // Le madd ʿāriḍ accepte 2, 4 ou 6 temps : on ne signale que les grands écarts.
-function judge(ratio, type) {
-  if (type === "arid") return ratio < 0.4 ? "court" : ratio > 2 ? "long" : "ok";
-  return ratio < 0.6 ? "court" : ratio > 1.75 ? "long" : "ok";
+function judge(ratio, type, excess) {
+  const x = excess == null ? 0 : excess;
+  if (type === "arid") return (ratio < 0.4 || (x < -3 && ratio < 0.6)) ? "court" : (ratio > 2 || (x > 5 && ratio > 1.4)) ? "long" : "ok";
+  return (ratio < 0.6 || (x < -1.5 && ratio < 0.8)) ? "court" : (ratio > 1.75 || (x > 1.5 && ratio > 1.35)) ? "long" : "ok";
 }
 // Correction personnelle apprise à l'étalonnage
 function groupOf(type) { return type === "arid" ? "arid" : (type === "lazim" || type === "muttasil" || type === "munfasil") ? "long" : "tabii"; }
@@ -344,30 +364,35 @@ function biasOf(bias, type) { const b = bias && bias[groupOf(type)]; return b &&
 const sec = f => f * HOP / SR;
 
 // ===== Analyse complète d'un verset =====
-function analyzeFull(ref, usr, bias) {
+// from : trame de la référence où l'élève a commencé (0 = début du verset)
+function analyzeFull(ref, usr, bias, from) {
   const F = ref.F, G = features(usr);
-  if (G.a1 - G.a0 < 20) return { items: [], tempo: 1, empty: true };
-  const path = dtw(F.cep, G.cep, F.a0, F.a1, G.a0, G.a1);
+  const A0 = Math.max(F.a0, Math.round(from || 0));
+  if (G.a1 - G.a0 < 20 || F.a1 - A0 < 20) return { items: [], tempo: 1, empty: true };
+  const path = dtw(F.cep, G.cep, A0, F.a1, G.a0, G.a1);
   const r2u = new Map(), u2r = new Map();
   for (const [i, j] of path) {
     if (!r2u.has(i)) r2u.set(i, [j, j]); else r2u.get(i)[1] = j;
     if (!u2r.has(j)) u2r.set(j, [i, i]); else u2r.get(j)[1] = i;
   }
-  const R = pathTempo(path, F.a0, F.a1);
+  const R = wordTempo(path, ref, A0) || pathTempo(path, A0, F.a1);
   const softU = maskBelow(G, G.a0, G.a1, 0.75);
+  const H = ref.haraka;
   const mapR = (s, e) => { let lo = Infinity, hi = -1; for (let i = s; i <= e; i++) { const v = r2u.get(i); if (v) { lo = Math.min(lo, v[0]); hi = Math.max(hi, v[1]); } } return [lo, hi]; };
   const mapU = (s, e) => { let lo = Infinity, hi = -1; for (let j = s; j <= e; j++) { const v = u2r.get(j); if (v) { lo = Math.min(lo, v[0]); hi = Math.max(hi, v[1]); } } return [lo, hi]; };
   const items = [];
-  for (const t of ref.targets) {
-    if (!t.seg || !t.rLen) { items.push({ w: t.w, type: t.type, syl: t.syl, kind: "nf" }); continue; }
+  ref.targets.forEach((t, mi) => {
+    const base = { w: t.w, type: t.type, syl: t.syl, mi };
+    if (!t.seg || !t.rLen || t.seg[0] < A0) { items.push({ ...base, kind: "nf" }); return; }
     const [s, e] = t.seg;
     const [lo, hi] = mapR(s, e);
-    if (hi < 0) { items.push({ w: t.w, type: t.type, syl: t.syl, kind: "nf" }); continue; }
+    if (hi < 0) { items.push({ ...base, kind: "nf" }); return; }
     const u = runIn(softU, lo - 6, hi + 6, 6);
     const raw = u.len / (t.rLen * R), ratio = raw / biasOf(bias, t.type);
-    items.push({ w: t.w, type: t.type, syl: t.syl, ref: [s, e], usr: u.seg || [lo, hi], refS: sec(t.rLen * R * biasOf(bias, t.type)), usrS: sec(u.len), raw, ratio, kind: judge(ratio, t.type) });
-  }
-  // voyelles tenues alors qu'al-Husary ne les tient pas
+    const excess = (u.len - t.rLen * R * biasOf(bias, t.type)) / (H * R); // écart en temps (harakat)
+    items.push({ ...base, ref: [s, e], usr: u.seg || [lo, hi], refS: sec(t.rLen * R * biasOf(bias, t.type)), usrS: sec(u.len), raw, ratio, excess, kind: judge(ratio, t.type, excess) });
+  });
+  // voyelles tenues alors que le récitateur ne les tient pas
   const segU = segmentsOf(softU, G.a0, G.a1, 10);
   for (const [s, e] of segU) {
     const len = e - s + 1;
@@ -388,7 +413,7 @@ function analyzeFull(ref, usr, bias) {
     if (bad && st < 0) st = k;
     if (!bad && st >= 0) {
       const p0 = path[st], p1 = path[k - 1];
-      const inside = p0[0] > F.a0 + 40 && p1[0] < F.a1 - 40;
+      const inside = p0[0] > A0 + 40 && p1[0] < F.a1 - 40;
       if (inside && (p1[0] - p0[0] >= 50 || p1[1] - p0[1] >= 50)) items.push({ w: wordAt(ref, (p0[0] + p1[0]) / 2).w, type: "diff", ref: [p0[0], p1[0]], usr: [p0[1], p1[1]], kind: "diff" });
       st = -1;
     }
@@ -397,8 +422,65 @@ function analyzeFull(ref, usr, bias) {
   return { items, tempo: R };
 }
 
+// Bilan croisé : un madd n'est compté faux que si l'élève s'écarte de TOUS les récitateurs.
+function combine(main, others) {
+  if (!others || !others.length) return main;
+  const out = { ...main, nRefs: 1 + others.length };
+  out.items = main.items.filter(it => {
+    if (it.type === "extra" || it.type === "diff") {
+      // gardé seulement si un autre récitateur le signale aussi sur le même mot
+      return others.some(o => o.items.some(x => x.type === it.type && Math.abs((x.w ?? -9) - (it.w ?? -9)) <= 1));
+    }
+    return true;
+  }).map(it => {
+    if (it.mi == null || it.kind === "nf" || it.type === "gen") return it;
+    const kinds = [it.kind];
+    for (const o of others) { const x = o.items.find(y => y.mi === it.mi); if (x && x.kind !== "nf") kinds.push(x.kind); }
+    let kind = it.kind;
+    if (kinds.includes("ok")) kind = "ok";
+    else if (kinds.every(k => k === "court")) kind = "court";
+    else if (kinds.every(k => k === "long")) kind = "long";
+    else kind = "ok";
+    return { ...it, kind, agree: kinds.filter(k => k === it.kind).length, compared: kinds.length };
+  });
+  return out;
+}
+
+// Faux départ : si l'élève a recommencé le verset, on n'analyse que sa dernière tentative.
+// Renvoie l'échantillon où commence la dernière reprise (0 s'il n'y en a pas).
+function lastStart(ref, x) {
+  const F = ref.F, G = features(x);
+  const A = F.cep.slice(F.a0, Math.min(F.a1, F.a0 + 120) + 1);
+  if (A.length < 40 || G.a1 - G.a0 < A.length * 1.5) return 0;
+  const B = G.cep.slice(0, G.a1 + 1);
+  const found = [];
+  let off = G.a0;
+  for (let k = 0; k < 4 && B.length - off > A.length * 0.7; k++) {
+    const p = dtwSub(A, B.slice(off));
+    const cost = p.reduce((q, v) => q + v[2], 0) / p.length;
+    found.push({ cost, st: off + p[0][1] });
+    off = off + p[p.length - 1][1] + 20;
+  }
+  if (found.length < 2) return 0;
+  const first = found[0];
+  let pick = first;
+  for (const f of found.slice(1)) if (f.cost <= first.cost * 1.05 && f.cost <= pick.cost * 1.1 && f.st > pick.st + 60) pick = f;
+  return pick === first ? 0 : Math.max(0, (pick.st - 15) * HOP);
+}
+
+// Où l'élève en est-il ? Cherche un extrait de sa voix dans tout le verset de référence.
+function relock(ref, x) {
+  const G = features(x), F = ref.F;
+  const A = G.cep.slice(G.a0, G.a1 + 1);
+  if (A.length < 80) return null;
+  const B = F.cep.slice(F.a0, F.a1 + 1);
+  if (B.length < 40) return null;
+  const p = dtwSub(A, B);
+  return { cost: p.reduce((q, v) => q + v[2], 0) / p.length, start: F.a0 + p[0][1], end: F.a0 + p[p.length - 1][1] };
+}
+
 // ===== Suivi en direct d'un verset =====
-function LiveTracker(ref, onEvent, profile, bias) {
+function LiveTracker(ref, onEvent, profile, bias, levels) {
   const F = ref.F, a0 = F.a0, a1 = F.a1, n = a1 - a0 + 1;
   let prev = new Float32Array(n).fill(Infinity), cur = new Float32Array(n).fill(Infinity);
   let buf = new Float32Array(0), off = 0, total = 0;
@@ -412,6 +494,9 @@ function LiveTracker(ref, onEvent, profile, bias) {
     for (let d = 0; d < D; d++) { mu[d] = profile.mu[d]; m2[d] = profile.sd[d] * profile.sd[d] * nAct; }
     floor = profile.floor; peak = profile.peak - 6;
   }
+  // niveaux déjà appris plus tôt dans la séance (évite de mal estimer le silence en reprenant au milieu d'une phrase)
+  const known = calibrated || !!(levels && levels.floor != null);
+  if (!calibrated && known) { floor = levels.floor; peak = levels.peak; }
 
   // alignement en ligne : la référence avance de 0, 1 ou 2 trames par trame de l'élève
   function step(c) {
@@ -480,8 +565,8 @@ function LiveTracker(ref, onEvent, profile, bias) {
 
   function onFrame(f) {
     peak = Math.max(peak, f.e);
-    if (fr.length < 25 && !calibrated) floor = floor === null ? f.e : Math.min(floor, f.e);
-    const thr = calibrated ? actThr(floor, peak) : Math.max((floor === null ? -100 : floor) + 12, peak - 38);
+    if (fr.length < 25 && !known) floor = floor === null ? f.e : Math.min(floor, f.e);
+    const thr = known ? actThr(floor, peak) : Math.max((floor === null ? -100 : floor) + 12, peak - 38);
     f.act = f.e > thr && fr.length >= 5;
     const k = fr.length;
     fr.push({ act: f.act });
@@ -496,6 +581,17 @@ function LiveTracker(ref, onEvent, profile, bias) {
   }
 
   return {
+    // recale le suivi sur la trame f de la référence
+    jumpTo(f) {
+      pos = Math.max(0, Math.min(n - 1, Math.round(f - a0)));
+      prev.fill(Infinity);
+      for (let i = Math.max(0, pos - 3); i <= Math.min(n - 1, pos + 3); i++) prev[i] = 0;
+      j = Math.max(j, 1);
+      ref.targets.forEach((t, idx) => { if (t.seg && t.seg[0] < a0 + pos) done.add(idx); });
+      if (started < 0) started = fr.length;
+    },
+    get posFrame() { return a0 + pos; },
+    get levels() { return fr.length >= 25 && floor != null ? { floor, peak } : null; },
     push(chunk) {
       chunks.push(chunk); total += chunk.length;
       const nb = new Float32Array(buf.length - off + chunk.length);
@@ -542,5 +638,5 @@ function locate(refs, x) {
   return { best, costs };
 }
 
-(typeof self !== "undefined" ? self : window).MiroirEngine = { SR, HOP, features, detectMadds, prepareRef, analyzeFull, LiveTracker, wordAt, voiceStats, locate, groupOf, percentile };
+(typeof self !== "undefined" ? self : window).MiroirEngine = { SR, HOP, features, detectMadds, prepareRef, analyzeFull, combine, relock, lastStart, LiveTracker, wordAt, voiceStats, locate, groupOf, percentile };
 })();

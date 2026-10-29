@@ -22,11 +22,21 @@ const RULES = {
 };
 const COUNTS = [7,286,200,176,120,165,206,75,129,109,123,111,43,52,99,128,111,110,98,135,112,78,118,64,77,227,93,88,69,60,34,30,73,54,45,83,182,88,75,85,54,53,89,59,37,35,38,29,18,45,60,49,62,55,78,96,29,22,24,13,14,11,11,18,12,12,30,52,52,44,28,28,20,56,40,31,50,40,46,42,29,19,36,25,22,17,19,26,30,20,15,21,11,8,8,19,5,8,8,11,11,8,3,9,5,4,7,3,6,3,5,4,5,6];
 const API = "https://api.quran.com/api/v4";
+// Récitateurs de référence, reconnus pour la rigueur de leur tajwid (minutage mot à mot fourni par quran.com)
+const RECITERS = [
+  { id: 6, name: "Mahmoud Khalil al-Husary", short: "al-Husary", folder: "Husary_64kbps" },
+  { id: 12, name: "al-Husary, version enseignement (lente)", short: "al-Husary lent", folder: "Husary_Muallim_128kbps" },
+  { id: 9, name: "Muhammad Siddiq al-Minshawi (murattal)", short: "al-Minshawi", folder: "Minshawy_Murattal_128kbps" },
+  { id: 2, name: "Abdul Basit Abdus Samad (murattal)", short: "Abdul Basit", folder: "Abdul_Basit_Murattal_64kbps" }
+];
+const recInfo = id => RECITERS.find(r => r.id === id) || RECITERS[0];
+const settings = () => ({ rec: 6, multi: true, ...store.get("settings", {}) });
+const saveSettings = p => store.set("settings", { ...settings(), ...p });
 
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null;
-const worker = new Worker("worker.js?v=4");
+const worker = new Worker("worker.js?v=5");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -65,8 +75,8 @@ async function loadChapters() {
   dbPut("chapters", list);
   return list;
 }
-async function loadSurah(id) {
-  const hit = await dbGet("q4:" + id); if (hit) return hit;
+async function loadText(id) {
+  const hit = await dbGet("t5:" + id); if (hit) return hit;
   let data = null;
   try {
     const verses = []; let page = 1;
@@ -76,40 +86,69 @@ async function loadSurah(id) {
       if (!d.pagination || !d.pagination.next_page) break;
       page = d.pagination.next_page;
     }
-    const segs = {}; let sp = 1;
-    try {
-      for (;;) {
-        const d = await getJSON(`${API}/recitations/6/by_chapter/${id}?fields=segments&per_page=50&page=${sp}`);
-        for (const a of d.audio_files) segs[a.verse_key] = a.segments || [];
-        if (!d.pagination || !d.pagination.next_page) break;
-        sp = d.pagination.next_page;
-      }
-    } catch (e) {}
     data = { id, v: verses.map(x => {
       const words = x.words.filter(w => w.char_type_name === "word"), end = x.words.find(w => w.char_type_name === "end");
-      return { p: x.page_number, w: words.map(w => [w.text_uthmani, w.page_number, w.line_number]), e: end ? [end.text_uthmani, end.page_number, end.line_number] : null, s: (segs[x.verse_key] || []).map(s => [s[0], s[1], s[2], s[3]]) };
+      return { k: pad3(id) + pad3(x.verse_number), n: x.verse_number, p: x.page_number, w: words.map(w => [w.text_uthmani, w.page_number, w.line_number]), e: end ? [end.text_uthmani, end.page_number, end.line_number] : null };
     }) };
   } catch (e) {
-    // secours : texte seul (sans minutage ni lignes du mushaf)
+    // secours : texte seul (sans les lignes du mushaf)
     try {
       const d = await getJSON(`https://api.alquran.cloud/v1/surah/${id}/quran-uthmani`);
       const basm = /^بِسْمِ\s+ٱللَّهِ\s+ٱلرَّحْمَٰنِ\s+ٱلرَّحِيمِ\s*/;
       data = { id, v: d.data.ayahs.map((a, k) => {
         const txt = (k === 0 && id !== 1) ? a.text.replace(basm, "") : a.text;
-        return { p: a.page, w: txt.split(/\s+/).filter(Boolean).map(t => [t, a.page, null]), e: [String(a.numberInSurah), a.page, null], s: [] };
+        return { k: pad3(id) + pad3(a.numberInSurah), n: a.numberInSurah, p: a.page, w: txt.split(/\s+/).filter(Boolean).map(t => [t, a.page, null]), e: [String(a.numberInSurah), a.page, null] };
       }) };
     } catch (e2) { return null; }
   }
-  if (data && data.v.length) dbPut("q4:" + id, data);
+  if (data && data.v.length) dbPut("t5:" + id, data);
   return data;
+}
+// minutage mot à mot + adresse de l'audio, pour un récitateur
+async function loadRec(id, rec) {
+  const hit = await dbGet(`r5:${rec}:${id}`); if (hit) return hit;
+  const out = {}; let sp = 1;
+  try {
+    for (;;) {
+      const d = await getJSON(`${API}/recitations/${rec}/by_chapter/${id}?fields=segments&per_page=50&page=${sp}`);
+      for (const a of d.audio_files) {
+        let u = a.url || "";
+        if (u.startsWith("//")) u = "https:" + u; else if (u && !/^https?:/.test(u)) u = "https://verses.quran.com/" + u;
+        out[a.verse_key] = { s: (a.segments || []).map(x => [x[0], x[1], x[2], x[3]]), u };
+      }
+      if (!d.pagination || !d.pagination.next_page) break;
+      sp = d.pagination.next_page;
+    }
+  } catch (e) { if (!Object.keys(out).length) return null; }
+  dbPut(`r5:${rec}:${id}`, out);
+  return out;
+}
+async function ensureRec(rec) {
+  if (!S) return;
+  S.recs = S.recs || {};
+  if (S.recs[rec]) return S.recs[rec];
+  S.recs[rec] = (async () => {
+    for (const sid of S.sur) {
+      const d = await loadRec(sid, rec);
+      for (const V of S.v) if (+V.k.slice(0, 3) === sid) {
+        V.r = V.r || {};
+        const x = d && d[`${sid}:${V.n}`];
+        V.r[rec] = { s: x ? x.s : [], u: x ? x.u : "" };
+      }
+    }
+  })();
+  return S.recs[rec];
 }
 
 /* ---------- audio d'al-Husary (64 kb/s : même minutage que quran.com) ---------- */
-async function getRef(k) {
-  const hit = await dbGet("h64:" + k);
+async function getAudio(rec, k, url) {
+  const id = `a:${rec}:${k}`;
+  const hit = await dbGet(id);
   if (hit) return hit;
-  for (const u of [`https://everyayah.com/data/Husary_64kbps/${k}.mp3`, `https://mirrors.quranicaudio.com/everyayah/Husary_64kbps/${k}.mp3`]) {
-    try { const r = await fetch(u, { mode: "cors" }); if (r.ok) { const b = await r.blob(); if (b.size > 1500) { dbPut("h64:" + k, b); return b; } } } catch (e) {}
+  const folder = recInfo(rec).folder;
+  const urls = [url, `https://everyayah.com/data/${folder}/${k}.mp3`, `https://mirrors.quranicaudio.com/everyayah/${folder}/${k}.mp3`].filter(Boolean);
+  for (const u of urls) {
+    try { const r = await fetch(u, { mode: "cors" }); if (r.ok) { const b = await r.blob(); if (b.size > 1500) { dbPut(id, b); return b; } } } catch (e) {}
   }
   return null;
 }
@@ -125,9 +164,9 @@ async function decode(blob) {
 }
 
 // minutage des mots (en trames de 10 ms), pour la lumière pendant l'écoute
-function wordTimes(V) {
-  const wt = [], n = V.w.length;
-  for (const [w0, w1, m0, m1] of V.s || []) { const k = Math.max(1, w1 - w0); for (let w = w0; w < w1; w++) wt[w] = [m0 / 10 + (m1 - m0) / 10 * (w - w0) / k, m0 / 10 + (m1 - m0) / 10 * (w - w0 + 1) / k]; }
+function wordTimes(V, rec) {
+  const wt = [], n = V.w.length, segs = (V.r && V.r[rec] && V.r[rec].s) || [];
+  for (const [w0, w1, m0, m1] of segs) { const k = Math.max(1, w1 - w0); for (let w = w0; w < w1; w++) wt[w] = [m0 / 10 + (m1 - m0) / 10 * (w - w0) / k, m0 / 10 + (m1 - m0) / 10 * (w - w0 + 1) / k]; }
   for (let w = 0; w < n; w++) if (!wt[w]) { const p = wt[w - 1] || [0, 0]; wt[w] = [p[1], p[1] + 30]; }
   return wt;
 }
@@ -145,23 +184,32 @@ function wordAtT(wt, f, total) {
 
 /* préparation des versets : audio décodé ici, référence calculée dans le worker */
 const prep = new Map(), bufs = new Map();
-const keyOf = vi => pad3(S.id) + pad3(vi + 1);
-function prepVerse(vi) {
+const keyOf = (vi, rec) => `${rec || settings().rec}|${S.v[vi].k}`;
+function prepVerse(vi, rec) {
+  rec = rec || settings().rec;
   if (!S || vi < 0 || vi >= S.v.length) return Promise.resolve(null);
-  const key = keyOf(vi);
+  const key = keyOf(vi, rec);
   if (prep.has(key)) return prep.get(key);
   const V = S.v[vi];
   const p = (async () => {
-    const blob = await getRef(key); if (!blob) return null;
+    await ensureRec(rec);
+    const R = (V.r && V.r[rec]) || { s: [], u: "" };
+    const blob = await getAudio(rec, V.k, R.u); if (!blob) return null;
     const { buf, x16 } = await decode(blob);
     bufs.set(key, buf);
     const copy = new Float32Array(x16);
-    worker.postMessage({ t: "prep", key, x16: copy, words: V.w.map(x => x[0]), segs: V.s }, [copy.buffer]);
-    return { buf, wt: wordTimes(V) };
+    worker.postMessage({ t: "prep", key, x16: copy, words: V.w.map(x => x[0]), segs: R.s }, [copy.buffer]);
+    return { buf, wt: wordTimes(V, rec) };
   })().catch(() => null);
   prep.set(key, p);
   p.then(v => { if (!v) prep.delete(key); });
   return p;
+}
+// verset courant + suivants, pour le récitateur principal (et les autres si bilan croisé)
+function prepAround(vi) {
+  const st = settings();
+  for (let k = 0; k <= 2; k++) prepVerse(vi + k, st.rec);
+  if (st.multi) RECITERS.filter(r => r.id !== st.rec && r.id !== 12).forEach(r => { prepVerse(vi, r.id); prepVerse(vi + 1, r.id); });
 }
 
 /* ---------- accueil ---------- */
@@ -192,6 +240,9 @@ function renderHome() {
     r.appendChild(t); r.appendChild(el("span", "ar-name", c.a || ""));
     r.onclick = () => { location.hash = "s" + c.id; };
   } else r.hidden = true;
+  const st = settings(), sel = $("recSel");
+  if (!sel.options.length) RECITERS.forEach(r => { const o = el("option", null, r.name); o.value = r.id; sel.appendChild(o); });
+  sel.value = st.rec; $("multi").checked = !!st.multi;
   const v = store.get("voice", null), cs = $("calibState");
   cs.textContent = v ? `Voix étalonnée le ${new Date(v.profile.date).toLocaleDateString("fr-FR")}` : "Pas encore étalonnée";
   $("calibBtn").textContent = v ? "Refaire" : "Étalonner";
@@ -202,22 +253,25 @@ function renderHome() {
 async function openSurah(id, calib) {
   stopAll();
   calibMode = !!calib;
-  const c = chapters[id - 1] || { id, n: "Sourate " + id, a: "", c: COUNTS[id - 1] };
+  const sur = calibMode ? [1, 108] : [id];
+  const c = calibMode ? { id: 0, n: "Étalonnage de ta voix", a: "" } : (chapters[id - 1] || { id, n: "Sourate " + id, a: "", c: COUNTS[id - 1] });
   $("home").hidden = true; $("surah").hidden = false; $("dock").hidden = false;
-  $("sName").textContent = `${c.id}. ${c.n}`; $("sAr").textContent = c.a || "";
+  $("sName").textContent = calibMode ? c.n : `${c.id}. ${c.n}`; $("sAr").textContent = c.a || "";
   $("calibBanner").hidden = !calibMode;
   $("pages").textContent = ""; $("pages").appendChild(el("p", "empty", "Chargement du texte…"));
   S = null; prep.clear(); bufs.clear();
-  const r = await loadSurah(id);
-  if (!r) { $("pages").textContent = ""; $("pages").appendChild(el("p", "empty", "Impossible de charger le texte. Vérifie ta connexion internet.")); return; }
-  S = r; S.c = c;
+  const parts = [];
+  for (const sid of sur) { const t = await loadText(sid); if (!t) { $("pages").textContent = ""; $("pages").appendChild(el("p", "empty", "Impossible de charger le texte. Vérifie ta connexion internet.")); return; } parts.push(t); }
+  S = { id: calibMode ? 0 : id, sur, c, v: parts.flatMap(t => t.v.map(V => ({ ...V }))), recs: {} };
   results = new Array(S.v.length).fill(null); usrBufs = [];
   const last = store.get("last", null);
   cur = calibMode ? 0 : (last && last.s === id ? Math.min(last.v, S.v.length - 1) : 0);
   renderPages();
+  updateRecChip();
   selectVerse(cur, !calibMode);
-  setStatus(calibMode ? "Touche le micro et récite toute Al-Fatiha, calmement." : "Touche un mot pour choisir le verset de départ, puis le micro.");
+  setStatus(calibMode ? "Étape 1 sur 2 : touche le micro, puis reste silencieux 3 secondes." : "Touche un mot pour choisir le verset de départ, puis le micro.");
 }
+function updateRecChip() { $("recLbl").textContent = recInfo(settings().rec).short; }
 
 function renderPages() {
   const box = $("pages"); box.textContent = "";
@@ -240,7 +294,9 @@ function renderPages() {
   let first = true;
   for (const [p, lines] of [...pages.entries()].sort((a, b) => a[0] - b[0])) {
     const pg = el("section", "page");
-    if (first && S.id !== 1 && S.id !== 9) pg.appendChild(el("div", "basmala", "بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ"));
+    const firstK = [...lines.values()][0][0];
+    const fv = firstK && firstK.dataset ? S.v[+firstK.dataset.v] : null;
+    if (fv && fv.n === 1 && !["001", "009"].includes(fv.k.slice(0, 3)) && +firstK.dataset.w === 0) pg.appendChild(el("div", "basmala", "بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ"));
     first = false;
     const keys = [...lines.keys()].sort((a, b) => a - b);
     keys.forEach((l, i) => {
@@ -264,7 +320,7 @@ function selectVerse(vi, scroll) {
   if (!calibMode) store.set("last", { s: S.id, v: cur });
   if (scroll) wordEls[cur][0].scrollIntoView({ block: "center", behavior: "smooth" });
   updateProg();
-  prepVerse(cur); prepVerse(cur + 1); prepVerse(cur + 2);
+  prepAround(cur);
 }
 
 function updateProg() {
@@ -316,10 +372,10 @@ async function playFrom(vi) {
   const L = listen;
   for (let v = vi; v < S.v.length && !L.stop; v++) {
     selectVerse(v, false);
-    setStatus(`Al-Husary · verset ${v + 1}`);
+    setStatus(`${recInfo(settings().rec).short} · verset ${S.v[v].n}`);
     const p = await prepVerse(v);
     if (L.stop) break;
-    if (!p) { setStatus("Impossible de charger l'audio d'al-Husary. Vérifie ta connexion internet."); break; }
+    if (!p) { setStatus("Impossible de charger l'audio du récitateur. Vérifie ta connexion internet."); break; }
     const src = c.createBufferSource(); src.buffer = p.buf; src.connect(c.destination);
     const t0 = c.currentTime + 0.05; src.start(t0); playing = src;
     const total = p.buf.duration * 100;
@@ -381,10 +437,13 @@ async function startRec() {
   rec = { stream, src, node, mute, vi: cur };
   clearLight();
   const voice = calibMode ? null : store.get("voice", null);
-  prepVerse(cur); prepVerse(cur + 1); prepVerse(cur + 2);
-  const msg = { t: "start", keys: S.v.map((_, i) => keyOf(i)), i: cur, rate: c.sampleRate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode };
+  const st = settings();
+  prepAround(cur);
+  const others = st.multi && !calibMode ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => r.id) : [];
+  const msg = { t: "start", keys: S.v.map((_, i) => keyOf(i, st.rec)), extra: S.v.map((_, i) => others.map(r => keyOf(i, r))), i: cur, rate: c.sampleRate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode };
   if (port) { msg.port = port; worker.postMessage(msg, [port]); } else worker.postMessage(msg);
   btn.classList.add("rec"); $("micIco").hidden = true; $("stopIco").hidden = false;
+  $("restart").disabled = false;
 }
 
 function stopRec(fromWorker) {
@@ -394,6 +453,7 @@ function stopRec(fromWorker) {
   r.stream.getTracks().forEach(t => t.stop());
   if (!fromWorker) worker.postMessage({ t: "stop" });
   $("mic").classList.remove("rec"); $("micIco").hidden = false; $("stopIco").hidden = true;
+  $("restart").disabled = true;
   veEls.forEach(v => v && v.classList.remove("st-run"));
   if (!calibMode) setStatus("Arrêté. Touche « Bilan » pour voir tes corrections.");
 }
@@ -409,12 +469,26 @@ worker.onmessage = e => {
       selectVerse(m.i, true);
       veEls.forEach(v => v && v.classList.remove("st-run"));
       if (veEls[m.i]) veEls[m.i].classList.add("st-run");
-      for (let k = 1; k <= 3; k++) prepVerse(m.i + k);
-      setStatus(m.ready ? `Verset ${m.i + 1} : récite…` : "Préparation du verset…");
+      prepAround(m.i);
+      if (!(calibMode && !rec.calibGo)) setStatus(m.ready ? `Verset ${S.v[m.i].n} : récite…` : "Préparation du verset…");
       break;
     }
     case "prepped":
-      if (rec && keyOf(rec.vi) === m.key) setStatus(`Verset ${rec.vi + 1} : récite…`);
+      if (rec && keyOf(rec.vi) === m.key && !(calibMode && !rec.calibGo)) setStatus(`Verset ${S.v[rec.vi].n} : récite…`);
+      break;
+    case "calibSilence":
+      setStatus(`Étape 1 sur 2 : reste silencieux… ${m.left}`);
+      break;
+    case "calibGo":
+      if (rec) rec.calibGo = true;
+      setStatus(m.noise && m.noise.floor > -42 ? "Étape 2 sur 2 : récite Al-Fatiha puis Al-Kawthar. (Il y a un peu de bruit autour de toi.)" : "Étape 2 sur 2 : récite Al-Fatiha puis Al-Kawthar, calmement.", "ok");
+      break;
+    case "goto":
+      clearLight();
+      setStatus(m.w ? `Reprise au mot touché, verset ${S.v[m.i].n}.` : `On reprend le verset ${S.v[m.i].n} depuis le début.`, "ok");
+      break;
+    case "relock":
+      setStatus(m.next ? `Recalé : tu es au verset ${S.v[m.i].n}.` : m.back ? `Recalé : tu as repris plus haut dans le verset ${S.v[m.i].n}.` : "Recalé sur ta voix.", "ok");
       break;
     case "pos":
       if (rec && m.i === rec.vi && m.w >= 0) setTarget(m.i, m.w, m.f);
@@ -428,7 +502,7 @@ worker.onmessage = e => {
       break;
     }
     case "jump":
-      setStatus(`Recalé : tu récites le verset ${m.i + 1}.`, "ok");
+      setStatus(`Recalé : tu récites le verset ${S.v[m.i].n}.`, "ok");
       break;
     case "verseEnd": {
       if (veEls[m.i]) veEls[m.i].classList.remove("st-run");
@@ -443,11 +517,12 @@ worker.onmessage = e => {
     case "result": {
       const res = m.res;
       res.refBuf = bufs.get(keyOf(m.i)); res.usrBuf = usrBufs[m.i];
+      res.recName = recInfo(settings().rec).short;
       results[m.i] = res;
       markVerse(m.i);
       updateProg();
       const bad = res.items.filter(isBad).length;
-      if (rec && bad && !calibMode) setStatus(`Verset ${m.i + 1} : ${bad} correction${bad > 1 ? "s" : ""}. Touche son numéro pour voir.`, "court");
+      if (rec && bad && !calibMode) setStatus(`Verset ${S.v[m.i].n} : ${bad} correction${bad > 1 ? "s" : ""}. Touche son numéro pour voir.`, "court");
       if (!calibMode && results.every(Boolean)) { const d = store.get("done", {}); d[S.id] = 1; store.set("done", d); }
       break;
     }
@@ -522,14 +597,16 @@ function card(vi, it, num, res) {
   if (it.kind !== "diff" && it.refS != null) {
     const bars = el("div", "bars"), max = Math.max(it.refS, it.usrS || 0, 0.3);
     const row = (label, val, cls) => { const r = el("div", "bar-row"); r.appendChild(el("span", "bar-label", label)); const tr = el("div", "bar-track"), f = el("div", "bar-fill " + cls); f.style.width = Math.max(4, 100 * val / max) + "%"; tr.appendChild(f); r.appendChild(tr); r.appendChild(el("span", "bar-val", fmtS(val))); return r; };
-    bars.appendChild(row("Repère", it.refS, "ref")); bars.appendChild(row("Toi", it.usrS || 0, "usr"));
-    bars.appendChild(el("div", "bar-note", store.get("voice", null) ? "Repère : al-Husary, ajusté à ton rythme et à ta voix étalonnée." : "Repère : al-Husary, ajusté à ton rythme."));
+    bars.appendChild(row(res.recName || "Repère", it.refS, "ref")); bars.appendChild(row("Toi", it.usrS || 0, "usr"));
+    let note = `Repère : ${res.recName || "le récitateur"}, ajusté à ton rythme${store.get("voice", null) ? " et à ta voix étalonnée" : ""}.`;
+    if (it.compared > 1 && it.kind !== "ok") note += ` Écart confirmé avec ${it.compared} récitateurs sur ${it.compared}.`;
+    bars.appendChild(el("div", "bar-note", note));
     c.appendChild(bars);
   }
   const fix = el("p", "fix"); if (it.kind !== "ok") fix.appendChild(el("strong", null, "À corriger : ")); fix.appendChild(document.createTextNode(advice(it))); c.appendChild(fix);
   if (it.ref) {
     const acts = el("div", "acts");
-    const b1 = el("button", "btn", "▶ Al-Husary"), b2 = el("button", "btn", "▶ Toi"), b3 = el("button", "btn primary", "▶ Lui puis toi");
+    const b1 = el("button", "btn", "▶ " + (res.recName || "Récitateur")), b2 = el("button", "btn", "▶ Toi"), b3 = el("button", "btn primary", "▶ Lui puis toi");
     b1.onclick = () => playSeg(res.refBuf, it.ref);
     b2.onclick = () => { if (it.usr) playSeg(res.usrBuf, it.usr); };
     b3.onclick = () => { const d = playSeg(res.refBuf, it.ref); setTimeout(() => { if (it.usr) playSeg(res.usrBuf, it.usr); }, (d + 0.5) * 1000); };
@@ -540,18 +617,37 @@ function card(vi, it, num, res) {
   return c;
 }
 
+function openRecPicker() {
+  const body = openSheet("Récitateur de référence");
+  const st = settings();
+  body.appendChild(el("p", "fix", "Ta récitation est comparée à ce récitateur. Tous les quatre sont reconnus pour la rigueur de leur tajwid."));
+  RECITERS.forEach(r => {
+    const b = el("button", "vrow" + (r.id === st.rec ? " sel" : ""));
+    b.appendChild(el("span", null, r.name));
+    b.appendChild(el("span", "pill " + (r.id === st.rec ? "ok" : ""), r.id === st.rec ? "✓ Choisi" : "Choisir"));
+    b.onclick = () => { if (rec) return; saveSettings({ rec: r.id }); prep.clear(); updateRecChip(); prepAround(cur); openRecPicker(); };
+    body.appendChild(b);
+  });
+  const lab = el("label", "vrow");
+  const cb = el("input"); cb.type = "checkbox"; cb.checked = !!st.multi;
+  cb.onchange = () => saveSettings({ multi: cb.checked });
+  const t = el("span", null, "Bilan croisé : ne compter un madd faux que s'il s'écarte de tous les récitateurs");
+  lab.append(t, cb); body.appendChild(lab);
+  if (rec) body.appendChild(el("p", "bar-note", "Arrête l'enregistrement pour changer de récitateur."));
+}
+
 function openSheet(title) { $("sheetTitle").textContent = title; $("sheetBody").textContent = ""; $("sheet").hidden = false; return $("sheetBody"); }
 function closeSheet() { $("sheet").hidden = true; }
 
 function openVerse(vi) {
   const res = results[vi];
-  const body = openSheet(`Verset ${vi + 1}`);
+  const body = openSheet(`Verset ${S.v[vi].n}`);
   if (!res) { body.appendChild(el("p", "empty", "Ce verset n'a pas encore été récité.")); return; }
   const bad = res.items.filter(isBad), good = res.items.filter(i => i.kind === "ok");
   const sc = el("div", "score " + (bad.length ? "warn" : "good"));
   sc.appendChild(el("div", "score-main", bad.length ? `${bad.length} correction${bad.length > 1 ? "s" : ""} à faire` : "Rien à corriger"));
   const nM = res.items.filter(i => i.type !== "extra" && i.type !== "diff" && i.kind !== "nf").length;
-  if (nM) sc.appendChild(el("div", "score-sub", `${good.length} madd sur ${nM} bien tenu${good.length > 1 ? "s" : ""} · ton rythme ${res.tempo >= 1 ? "plus lent" : "plus rapide"} qu'al-Husary est pris en compte`));
+  if (nM) sc.appendChild(el("div", "score-sub", `${good.length} madd sur ${nM} bien tenu${good.length > 1 ? "s" : ""} · ${res.nRefs > 1 ? `comparé à ${res.nRefs} récitateurs` : `comparé à ${res.recName}`}, en tenant compte de ton rythme`));
   body.appendChild(sc);
   bad.forEach((it, i) => body.appendChild(card(vi, it, i + 1, res)));
   if (good.length) {
@@ -572,7 +668,7 @@ function openReport() {
   body.appendChild(sc);
   done.forEach(([r, i]) => {
     const n = r.items.filter(isBad).length;
-    const b = el("button", "vrow"); b.appendChild(el("span", null, `Verset ${i + 1}`));
+    const b = el("button", "vrow"); b.appendChild(el("span", null, `Verset ${S.v[i].n}`));
     b.appendChild(el("span", "pill " + (n ? "warn" : "ok"), n ? `${n} correction${n > 1 ? "s" : ""}` : "✓ Bien"));
     b.onclick = () => openVerse(i);
     body.appendChild(b);
@@ -580,23 +676,29 @@ function openReport() {
 }
 
 function showCalib(m) {
-  const body = openSheet(m.ok ? "Voix étalonnée" : "Étalonnage incomplet");
+  const body = openSheet(m.ok ? "Ta voix est étalonnée" : "Étalonnage incomplet");
   if (!m.ok) {
-    body.appendChild(el("p", "fix", "Il faut réciter au moins deux versets d'Al-Fatiha en entier pour que l'application apprenne ta voix. Réessaie en récitant calmement jusqu'au bout."));
+    body.appendChild(el("p", "fix", `L'application n'a pu analyser que ${m.verses} verset${m.verses > 1 ? "s" : ""} sur ${m.total}. Récite au moins 3 versets en entier, calmement et dans un endroit calme, puis recommence.`));
+    const b = el("button", "btn primary", "Recommencer"); b.onclick = () => { closeSheet(); openSurah(0, true); };
+    body.appendChild(b);
     return;
   }
+  const row = (label, value, good) => { const r = el("div", "vrow"); r.appendChild(el("span", null, label)); r.appendChild(el("span", "pill " + (good ? "ok" : "warn"), value)); body.appendChild(r); };
   const sc = el("div", "score good");
   sc.appendChild(el("div", "score-main", "C'est enregistré"));
-  sc.appendChild(el("div", "score-sub", `${m.verses} versets écoutés. L'application connaît maintenant ton timbre, ton volume et ta façon de tenir les madds.`));
+  sc.appendChild(el("div", "score-sub", `${m.verses} versets analysés. L'application connaît maintenant ton timbre, ton volume, ton rythme et ta façon de tenir les madds.`));
   body.appendChild(sc);
-  const pct = v => { const p = Math.round((v - 1) * 100); return p === 0 ? "comme al-Husary" : p > 0 ? `${p} % plus long qu'al-Husary` : `${-p} % plus court qu'al-Husary`; };
-  const rows = [["Madds naturels (2 temps)", m.bias.tabii, m.counts.tabii], ["Madds longs (4 à 6 temps)", m.bias.long, m.counts.long], ["Fins de verset", m.bias.arid, m.counts.arid]];
-  rows.forEach(([lbl, v, n]) => {
-    const r = el("div", "vrow"); r.appendChild(el("span", null, lbl));
-    r.appendChild(el("span", "pill ok", n >= 2 ? pct(v) : "pas assez d'exemples"));
-    body.appendChild(r);
-  });
-  body.appendChild(el("p", "fix", "Ces écarts sont maintenant considérés comme ta façon normale de réciter : seules les vraies erreurs seront signalées. Tu peux refaire l'étalonnage quand tu veux depuis l'accueil."));
+  body.appendChild(el("h3", "sub-h", "Qualité de l'enregistrement"));
+  const q = m.snr >= 35 ? ["Excellente", true] : m.snr >= 25 ? ["Bonne", true] : ["Trop de bruit", false];
+  row("Ta voix par rapport au bruit ambiant", q[0], q[1]);
+  const f = m.reached ? m.followed / m.reached : 0;
+  row("Suivi de ta voix", `${m.followed} verset${m.followed > 1 ? "s" : ""} sur ${m.reached} suivis jusqu'au bout`, f >= 0.7);
+  body.appendChild(el("h3", "sub-h", "Ta façon de tenir les madds"));
+  const pct = (v, n) => { if (n < 2) return ["pas assez d'exemples", true]; const p = Math.round((v - 1) * 100); return [p === 0 ? "comme le récitateur" : p > 0 ? `${p} % plus long` : `${-p} % plus court`, Math.abs(p) <= 30]; };
+  [["Madds naturels (2 temps)", m.bias.tabii, m.counts.tabii], ["Madds longs (4 à 6 temps)", m.bias.long, m.counts.long], ["Fins de verset", m.bias.arid, m.counts.arid]].forEach(([l, v, n]) => { const [t, g] = pct(v, n); row(l, t, g); });
+  body.appendChild(el("p", "fix", "Ces petits écarts sont maintenant considérés comme ta façon normale de réciter : seules les vraies erreurs seront signalées."));
+  if (!q[1]) body.appendChild(el("p", "fix", "Conseil : refais l'étalonnage dans une pièce plus calme, le téléphone ou la tablette à 20 à 30 cm de ta bouche."));
+  if (f < 0.7) body.appendChild(el("p", "fix", "Conseil : le suivi a décroché sur certains versets. Pendant la récitation, tu peux toucher un mot pour te recaler, ou « Reprendre » pour recommencer le verset."));
   const b = el("button", "btn primary", "Retour à l'accueil"); b.onclick = () => { closeSheet(); location.hash = ""; };
   body.appendChild(b);
 }
@@ -614,13 +716,19 @@ $("back").addEventListener("click", () => { location.hash = ""; });
 $("calibBtn").addEventListener("click", () => { location.hash = "etalonnage"; });
 $("pages").addEventListener("click", e => {
   const ve = e.target.closest(".ve");
-  if (ve) { const vi = +ve.dataset.v; if (results[vi]) openVerse(vi); else if (!rec) selectVerse(vi); return; }
+  if (ve) { const vi = +ve.dataset.v; if (results[vi]) openVerse(vi); else if (rec) worker.postMessage({ t: "goto", i: vi, w: 0 }); else selectVerse(vi); return; }
   const w = e.target.closest(".w");
-  if (w && !rec && !listen && !calibMode) { selectVerse(+w.dataset.v); setStatus(`Départ : verset ${+w.dataset.v + 1}. Touche le micro ou Écouter.`); }
+  if (!w) return;
+  if (rec && !(calibMode && !rec.calibGo)) { worker.postMessage({ t: "goto", i: +w.dataset.v, w: +w.dataset.w }); return; }
+  if (!listen && !calibMode) { selectVerse(+w.dataset.v); setStatus(`Départ : verset ${S.v[+w.dataset.v].n}. Touche le micro ou Écouter.`); }
 });
 $("mic").addEventListener("click", () => rec ? stopRec() : startRec());
 $("listen").addEventListener("click", () => listen ? stopListen() : (S && playFrom(cur)));
 $("report").addEventListener("click", openReport);
+$("restart").addEventListener("click", () => { if (rec) worker.postMessage({ t: "restart" }); });
+$("recBtn").addEventListener("click", openRecPicker);
+$("recSel").addEventListener("change", e => { saveSettings({ rec: +e.target.value }); });
+$("multi").addEventListener("change", e => { saveSettings({ multi: e.target.checked }); });
 $("sheetClose").addEventListener("click", closeSheet);
 $("sheet").addEventListener("click", e => { if (e.target === $("sheet")) closeSheet(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
