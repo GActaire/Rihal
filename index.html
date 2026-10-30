@@ -99,7 +99,8 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .w .t{color:var(--m-ink)}
 .w.cv{background:var(--m-accent-soft)}
 .w.done .t{color:var(--m-accent)}
-.w.on .t{background-image:linear-gradient(to left,var(--m-glow) 0,var(--m-accent) calc(var(--f,0)*100%),var(--m-ink) calc(var(--f,0)*100% + 1px));-webkit-background-clip:text;background-clip:text;color:transparent}
+.w.on .t{background-image:linear-gradient(to left,var(--m-accent) 0,var(--m-accent) var(--a,0%),var(--m-glow) var(--a,0%),var(--m-glow) var(--b,0%),var(--rest,var(--m-ink)) var(--b,0%));-webkit-background-clip:text;background-clip:text;color:transparent}
+.pages.masked .w.on{--rest:transparent}
 .w.on{background:var(--m-accent-soft);box-shadow:0 0 0 2px var(--m-accent-2)}
 .w.k-court{background:var(--m-short-soft);box-shadow:inset 0 -4px 0 var(--m-short)}
 .w.k-long{background:var(--m-long-soft);box-shadow:inset 0 -4px 0 var(--m-long)}
@@ -132,7 +133,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .mic{width:76px;height:76px;border-radius:50%;border:0;background:var(--m-accent);color:#fff;display:grid;place-items:center;cursor:pointer;box-shadow:0 0 0 6px var(--m-accent-soft);transition:transform .15s;touch-action:manipulation}
 .mic svg{width:34px;height:34px}
 .mic:active{transform:scale(.94)}
-.mic.rec{background:var(--m-diff);box-shadow:0 0 0 6px var(--m-diff-soft);animation:mpulse 1.4s ease-in-out infinite}
+.mic.rec{background:var(--m-diff);box-shadow:0 0 0 calc(6px + var(--lvl,0) * 18px) var(--m-diff-soft);transition:box-shadow .09s linear}
 .mic.busy{opacity:.55}
 @keyframes mpulse{50%{box-shadow:0 0 0 14px var(--m-diff-soft)}}
 
@@ -235,6 +236,24 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .pages.masked .w:not(.out):not(.on):not(.done):not(.peek){background:var(--m-bg);box-shadow:inset 0 -2px 0 var(--m-line)}
 .pages.masked .w.peek .t{color:var(--m-short)}
 @media (max-width:560px){.h-stats{grid-template-columns:repeat(2,1fr)}}
+
+/* réciter sans choisir + reconnaissance vocale */
+.auto-btn{display:flex;align-items:center;gap:16px;width:100%;text-align:left;border:2px solid var(--m-accent);border-radius:20px;padding:16px 18px;background:var(--m-surface);color:var(--m-ink);cursor:pointer}
+.auto-btn:active{transform:scale(.99)}
+.auto-ico{flex:none;width:58px;height:58px;border-radius:50%;background:var(--m-accent);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 6px var(--m-accent-soft)}
+.auto-ico svg{width:30px;height:30px}
+.auto-txt b{display:block;font-size:20px;font-weight:800}
+.auto-txt span{font-size:14px;color:var(--m-muted)}
+.asr-card{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;border:1px dashed var(--m-accent);border-radius:16px;padding:14px 16px;background:var(--m-accent-soft)}
+.asr-card.done{border-style:solid;background:var(--m-surface)}
+.asr-t{display:flex;flex-direction:column;gap:6px;flex:1 1 300px;min-width:0}
+.asr-t b{font-size:16px}
+.asr-t span{font-size:13px;color:var(--m-muted)}
+.auto-live{display:grid;place-items:center;padding:44px 0 40px}
+.auto-ring{width:96px;height:96px;border-radius:50%;background:var(--m-diff);color:#fff;display:grid;place-items:center;box-shadow:0 0 0 calc(8px + var(--lvl,0) * 26px) var(--m-diff-soft);transition:box-shadow .09s linear}
+.auto-ring svg{width:44px;height:44px}
+.auto-status{text-align:center;font-size:17px;font-weight:700}
+.suggest{display:block;max-width:600px;margin:0 auto 8px;width:100%;border:0;border-radius:12px;padding:10px 14px;background:var(--m-accent);color:#fff;font:700 14px var(--m-f-ui);cursor:pointer}
 @media (max-width:480px){.grid{grid-template-columns:1fr}.bar-row{grid-template-columns:64px 1fr 56px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
@@ -247,13 +266,15 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
         <g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linejoin="round"><rect x="13" y="13" width="38" height="38" rx="5"/><rect x="13" y="13" width="38" height="38" rx="5" transform="rotate(45 32 32)"/></g>
         <g fill="currentColor"><rect x="21.5" y="27" width="3" height="10" rx="1.5"/><rect x="26.5" y="22" width="3" height="20" rx="1.5"/><rect x="31.5" y="18" width="3" height="28" rx="1.5"/><rect x="36.5" y="23" width="3" height="18" rx="1.5"/><rect x="41.5" y="28" width="3" height="8" rx="1.5"/></g>
       </svg>
-      <div><h1>Rihal</h1><p class="tag">Récite, corrige, mémorise.</p></div>
+      <div><h1>Rihal</h1><p class="tag">Récite, Rihal te suit lettre par lettre.</p></div>
     </header>
+    <button id="autoBtn" class="auto-btn"><span class="auto-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 14.5a3.5 3.5 0 0 0 3.5-3.5V5.5a3.5 3.5 0 1 0-7 0V11a3.5 3.5 0 0 0 3.5 3.5Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.91V19H8.5a1 1 0 1 0 0 2h7a1 1 0 1 0 0-2H13v-2.09A6 6 0 0 0 18 11Z"/></svg></span><span class="auto-txt"><b>Réciter</b><span id="autoSub">Appuie et récite : Rihal trouve la sourate et le verset.</span></span></button>
     <button id="hifzCard" class="hifz-card"></button>
     <div id="calibCard" class="calib">
       <div><b>Ma voix</b><span id="calibState">Pas encore étalonnée</span></div>
       <button id="calibBtn" class="btn primary">Étalonner</button>
     </div>
+    <div id="asrCard" class="asr-card"></div>
     <div class="settings">
       <label class="field"><span>Récitateur de référence</span><select id="recSel"></select></label>
       <label class="check"><input id="multi" type="checkbox"> <span>Bilan croisé avec les autres récitateurs (moins de fausses erreurs)</span></label>
@@ -278,6 +299,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
   </section>
 
   <div id="dock" class="dock" hidden>
+    <button id="suggest" class="suggest" hidden></button>
     <div id="status" class="status-line">Touche un mot pour choisir le verset de départ, puis le micro.</div>
     <div class="dock-row">
       <button id="listen" class="dock-btn"><svg viewBox="0 0 24 24"><path id="listenIco" fill="currentColor" d="M8 5v14l11-7z"/></svg><span id="listenLbl">Écouter</span></button>
@@ -295,6 +317,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     </div>
   </div>
 </div>
-<script src="app.js?v=6"></script>
+<script src="search.js?v=7"></script>
+<script src="app.js?v=7"></script>
 </body>
 </html>

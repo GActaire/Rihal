@@ -234,7 +234,7 @@ function pathTempo(path, a0, a1) {
 }
 
 // ===== Repérage des madds dans le texte uthmani =====
-const isMark = c => { const x = c.codePointAt(0); return (x >= 0x064B && x <= 0x065F) || x === 0x0670 || (x >= 0x06D6 && x <= 0x06ED); };
+const isMark = c => { const x = c.codePointAt(0); return (x >= 0x064B && x <= 0x065F) || x === 0x0670 || (x >= 0x06D6 && x <= 0x06ED) || (x >= 0x08F0 && x <= 0x08FF); };
 const FATHA = "َ", DAMMA = "ُ", KASRA = "ِ", SUKUN = "ْ", SUKUN2 = "ۡ", SHADDA = "ّ", MADDAH = "ٓ", DAGGER = "ٰ", SILENT = "۟";
 const VOWELS = /[ً-ْۡ]/;
 const HAMZA = /[ءأإؤئ]/;
@@ -276,19 +276,72 @@ function detectMadds(words) {
       // madd en fin de mot suivi d'une hamzat wasl : il tombe à la liaison
       if (i === nb - 1 && nextStartsWasl && type === "tabii") continue;
       const syl = (prev ? prev.c + prev.m : "") + c + m;
-      res.push({ w: wi, type, at: (i + 0.5) / nb, syl, idx: i, nb });
+      res.push({ w: wi, type, at: (i + 0.5) / nb, syl, idx: i, nb, li: i });
     }
   });
   // madd ʿāriḍ : dernière voyelle longue du verset, suivie d'une seule lettre
   const lw = words.length - 1;
   const last = res.filter(r => r.w === lw).pop();
   if (last && last.type === "tabii" && last.nb - last.idx <= 2) last.type = "arid";
-  return res.map(({ w, type, at, syl }) => ({ w, type, at, syl }));
+  return res.map(({ w, type, at, syl, li }) => ({ w, type, at, syl, li }));
+}
+
+// ===== Lettres : durée relative de chaque lettre (avec ses voyelles) dans un mot =====
+const HARAKAT = { tabii: 1.7, munfasil: 3.6, muttasil: 3.6, lazim: 5.5, arid: 3.6 };
+function letterWeights(word, firstOfVerse) {
+  const L = letters(word.replace(/\u0622/g, "\u0627\u0653"));
+  return L.map(({ c, m }, i) => {
+    if (m.includes(SILENT)) return 0.15;                       // lettre écrite mais non prononcée
+    if (c === "ٱ") return firstOfVerse && i === 0 ? 0.7 : 0.15; // hamzat wasl
+    if (c === "ـ" && !m) return 0.1;
+    let w = 1;
+    if (m.includes(SUKUN) || m.includes(SUKUN2)) w = 0.65;
+    else if (!VOWELS.test(m) && !m.includes(DAGGER) && !m.includes(SHADDA)) w = 0.45;
+    if (m.includes(SHADDA)) w += 0.7;
+    if (/[\u064B-\u064D\u08F0-\u08F2]/.test(m)) w += 0.35;      // tanwin : un n en plus
+    return w;
+  });
+}
+// bornes (en trames) de chaque lettre dans chaque mot de la référence ; les madds sont calés sur leur durée réelle
+function letterTimes(ref, words, targets) {
+  const lt = [];
+  words.forEach((word, w) => {
+    const t = ref.wt[w]; if (!t) { lt.push(null); return; }
+    const W = letterWeights(word, w === 0);
+    for (const tg of targets) if (tg.w === w && tg.li != null && tg.li < W.length) W[tg.li] = Math.max(W[tg.li], HARAKAT[tg.type] || 1.7);
+    const pins = targets.filter(tg => tg.w === w && tg.li != null && tg.li < W.length && tg.seg)
+      .map(tg => ({ k: tg.li, s: Math.max(t[0], tg.seg[0]), e: Math.min(t[1], tg.seg[1]) }))
+      .filter(p => p.e - p.s >= 3).sort((a, b) => a.k - b.k);
+    const B = new Float32Array(W.length + 1);
+    const fill = (k0, k1, s, e) => { // lettres k0..k1-1 entre s et e, au prorata
+      let tot = 0; for (let k = k0; k < k1; k++) tot += W[k];
+      let acc = s; B[k0] = s;
+      for (let k = k0; k < k1; k++) { acc += tot > 0 ? (e - s) * W[k] / tot : (e - s) / (k1 - k0); B[k + 1] = acc; }
+    };
+    let ok = true;
+    { let kk = 0, ss = t[0]; for (const p of pins) { if (p.k < kk || p.s < ss) { ok = false; break; } kk = p.k + 1; ss = p.e; } }
+    let k = 0, s = t[0];
+    if (ok) for (const p of pins) { fill(k, p.k, s, p.s); B[p.k] = p.s; B[p.k + 1] = p.e; k = p.k + 1; s = p.e; }
+    fill(k, W.length, s, Math.max(s, t[1]));
+    B[W.length] = Math.max(B[W.length], t[1]);
+    lt.push(Array.from(B));
+  });
+  return lt;
+}
+// mot et lettre prononcés à la trame f de la référence
+function letterAt(ref, f) {
+  const wp = wordAt(ref, f);
+  const B = ref.lt && ref.lt[wp.w];
+  if (!B || B.length < 2) return { w: wp.w, wf: wp.f, l: -1, lf: 0 };
+  let k = 0;
+  while (k < B.length - 2 && f >= B[k + 1]) k++;
+  const lf = Math.max(0, Math.min(1, (f - B[k]) / Math.max(1, B[k + 1] - B[k])));
+  return { w: wp.w, wf: wp.f, l: k, lf };
 }
 
 // ===== Préparation de la référence =====
 // wordTimes : [[w0, w1, ms0, ms1], ...] (minutage d'al-Husary, mots 0-based, w1 exclusif)
-function prepareRef(x, madds, wordTimes, nWords) {
+function prepareRef(x, madds, wordTimes, nWords, words) {
   const F = features(x);
   const { a0, a1 } = F;
   const mask = maskBelow(F, a0, a1, 0.6), soft = maskBelow(F, a0, a1, 0.75);
@@ -335,6 +388,7 @@ function prepareRef(x, madds, wordTimes, nWords) {
   const haraka = Math.min(22, Math.max(10, tab.length ? percentile(tab, 0.5) / 3 : 14));
   const ref = { F, mask, soft, segs, unit, targets, wt, nWords: nWords || wt.length, haraka };
   for (const t of targets) if ((t.w == null || t.w < 0) && t.seg) t.w = wordAt(ref, (t.seg[0] + t.seg[1]) / 2).w;
+  if (words && words.length) ref.lt = letterTimes(ref, words, targets);
   return ref;
 }
 
@@ -596,8 +650,8 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
     if (started >= 0 && (f.act || hang)) step(f.c);
     if (started < 0) return;
     if (k % 2 === 0) {
-      const wp = wordAt(ref, a0 + pos);
-      onEvent({ type: "pos", frame: a0 + pos, frac: pos / Math.max(1, n - 1), w: wp.w, wf: wp.f });
+      const wp = letterAt(ref, a0 + pos);
+      onEvent({ type: "pos", frame: a0 + pos, frac: pos / Math.max(1, n - 1), w: wp.w, wf: wp.wf, l: wp.l, lf: wp.lf });
     }
     checkMadds(false);
   }
@@ -660,5 +714,5 @@ function locate(refs, x) {
   return { best, costs };
 }
 
-(typeof self !== "undefined" ? self : window).MiroirEngine = { SR, HOP, features, detectMadds, prepareRef, analyzeFull, combine, relock, lastStart, LiveTracker, wordAt, voiceStats, locate, groupOf, percentile };
+(typeof self !== "undefined" ? self : window).MiroirEngine = { SR, HOP, features, detectMadds, prepareRef, analyzeFull, combine, relock, lastStart, LiveTracker, wordAt, letterAt, letterWeights, voiceStats, locate, groupOf, percentile };
 })();

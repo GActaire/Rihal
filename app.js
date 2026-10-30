@@ -30,13 +30,13 @@ const RECITERS = [
   { id: 2, name: "Abdul Basit Abdus Samad (murattal)", short: "Abdul Basit", folder: "Abdul_Basit_Murattal_64kbps" }
 ];
 const recInfo = id => RECITERS.find(r => r.id === id) || RECITERS[0];
-const settings = () => ({ rec: 6, multi: true, ...store.get("settings", {}) });
+const settings = () => ({ rec: 6, multi: true, asr: false, ...store.get("settings", {}) });
 const saveSettings = p => store.set("settings", { ...settings(), ...p });
 
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
-let rec = null, listen = null;
-const worker = new Worker("worker.js?v=6");
+let rec = null, listen = null, pendingStart = false;
+const worker = new Worker("worker.js?v=7");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -208,7 +208,7 @@ function prepVerse(vi, rec) {
 // verset courant + suivants, pour le récitateur principal (et les autres si bilan croisé)
 function prepAround(vi) {
   const st = settings();
-  for (let k = 0; k <= 2; k++) prepVerse(vi + k, st.rec);
+  for (let k = 0; k <= 3; k++) prepVerse(vi + k, st.rec);
   if (st.multi) RECITERS.filter(r => r.id !== st.rec && r.id !== 12).forEach(r => { prepVerse(vi, r.id); prepVerse(vi + 1, r.id); });
 }
 
@@ -243,7 +243,7 @@ function renderHome() {
   const st = settings(), sel = $("recSel");
   if (!sel.options.length) RECITERS.forEach(r => { const o = el("option", null, r.name); o.value = r.id; sel.appendChild(o); });
   sel.value = st.rec; $("multi").checked = !!st.multi;
-  hifzCard();
+  hifzCard(); asrUi();
   const v = store.get("voice", null), cs = $("calibState");
   cs.textContent = v ? `Voix étalonnée le ${new Date(v.profile.date).toLocaleDateString("fr-FR")}` : "Pas encore étalonnée";
   $("calibBtn").textContent = v ? "Refaire" : "Étalonner";
@@ -252,7 +252,9 @@ function renderHome() {
 
 /* ---------- lecture d'une sourate ---------- */
 async function openSurah(id, calib) {
-  stopAll();
+  const keep = !calib && rec && rec.located && rec.located.s === id;
+  if (keep) stopListen(); else stopAll();
+  $("suggest").hidden = true;
   calibMode = !!calib;
   const sur = calibMode ? [1, 108] : [id];
   const c = calibMode ? { id: 0, n: "Étalonnage de ta voix", a: "" } : (chapters[id - 1] || { id, n: "Sourate " + id, a: "", c: COUNTS[id - 1] });
@@ -273,7 +275,9 @@ async function openSurah(id, calib) {
   markRange(); hifzBar();
   updateRecChip();
   selectVerse(cur, !calibMode);
-  setStatus(calibMode ? "Étape 1 sur 2 : touche le micro, puis reste silencieux 3 secondes." : H ? (H.step === 0 ? "Touche « Écouter »." : "Touche le micro quand tu es prêt.") : "Touche un mot pour choisir le verset de départ, puis le micro.");
+  setStatus(calibMode ? "Étape 1 sur 2 : touche le micro, puis reste silencieux 3 secondes." : H ? (H.step === 0 ? "Touche « Écouter »." : "Touche le micro quand tu es prêt.") : asrReady() ? "Touche le micro et récite : Rihal reconnaît le verset tout seul." : "Touche un mot pour choisir le verset de départ, puis le micro.");
+  if (keep && rec) beginLocated();
+  else if (pendingStart && !calibMode) { pendingStart = false; startRec(); }
 }
 function updateRecChip() { $("recLbl").textContent = recInfo(settings().rec).short; }
 
@@ -335,35 +339,70 @@ function updateProg() {
 function setStatus(t, kind) { const s = $("status"); s.textContent = t; s.className = "status-line" + (kind ? " k-" + kind : ""); }
 
 /* ---------- lumière fluide : la cible vient du worker, l'affichage la rejoint à chaque image ---------- */
-const lit = { tv: -1, tw: -1, tf: 0, dv: -1, dw: -1, df: 0, raf: 0 };
-function setTarget(vi, wi, f) {
+const lit = { tv: -1, tw: -1, tf: 0, tl: -1, tlf: 0, dv: -1, dw: -1, da: 0, db: 0, raf: 0 };
+function setTarget(vi, wi, f, l, lf) {
   if (vi === lit.tv && wi < lit.tw) return; // jamais en arrière dans un verset
-  lit.tv = vi; lit.tw = wi; lit.tf = f;
+  lit.tv = vi; lit.tw = wi; lit.tf = f; lit.tl = l == null ? -1 : l; lit.tlf = lf || 0;
   if (!lit.raf) lit.raf = requestAnimationFrame(frameLight);
 }
+// une « lettre » = la lettre de base et ses signes (voyelles, sukun, chadda, madda…), comme dans le moteur
+const isMk = ch => { const x = ch.charCodeAt(0); return (x >= 0x64B && x <= 0x65F) || x === 0x670 || (x >= 0x6D6 && x <= 0x6ED) || (x >= 0x8F0 && x <= 0x8FF); };
+function clusters(s) { const out = []; for (let i = 0; i < s.length; i++) { if (isMk(s[i]) && out.length) out[out.length - 1][1] = i + 1; else out.push([i, i + 1]); } return out; }
+// position de chaque lettre à l'écran, en fraction de la largeur du mot depuis la droite (le texte reste d'un seul tenant : les liaisons arabes sont intactes)
+function glyphs(w) {
+  const t = w.firstChild; if (!t || !t.firstChild) return null;
+  const R = t.getBoundingClientRect(); if (!R.width) return null;
+  if (w._g && Math.abs(w._gw - R.width) < 0.5) return w._g;
+  const node = t.firstChild, s = node.textContent, rg = document.createRange(), out = [];
+  const cl = (x) => Math.max(0, Math.min(1, x));
+  for (const [a, b] of clusters(s)) {
+    rg.setStart(node, a); rg.setEnd(node, b);
+    const r = rg.getBoundingClientRect();
+    let x0 = r.width ? cl((R.right - r.right) / R.width) : null, x1 = r.width ? cl((R.right - r.left) / R.width) : null;
+    out.push([x0, x1]);
+  }
+  for (let k = 0; k < out.length; k++) {
+    const p = k ? out[k - 1] : [0, 0];
+    if (out[k][0] == null) out[k] = [p[1], p[1]];
+    out[k][0] = Math.max(out[k][0], p[0]); out[k][1] = Math.max(out[k][1], out[k][0] + 0.01);
+  }
+  if (out.length) out[out.length - 1][1] = 1;
+  w._g = out; w._gw = R.width;
+  return out;
+}
+function letterIn(lt, w, f) {
+  const B = lt && lt[w]; if (!B || B.length < 2) return { l: -1, lf: 0 };
+  let k = 0; while (k < B.length - 2 && f >= B[k + 1]) k++;
+  return { l: k, lf: Math.max(0, Math.min(1, (f - B[k]) / Math.max(1, B[k + 1] - B[k]))) };
+}
+const ltMap = new Map();
+const unlight = w => { w.classList.remove("on"); w.style.removeProperty("--a"); w.style.removeProperty("--b"); };
 function frameLight() {
   lit.raf = 0;
   if (lit.tv < 0) return;
+  const ws = wordEls[lit.tv]; if (!ws) return;
   if (lit.dv !== lit.tv || lit.dw !== lit.tw) {
-    if (lit.dv !== lit.tv) {
-      if (lit.dv >= 0) (wordEls[lit.dv] || []).forEach(w => { w.classList.remove("on"); w.style.removeProperty("--f"); });
-      lit.dv = lit.tv;
-    }
-    const ws = wordEls[lit.dv]; if (!ws) return;
-    for (let k = 0; k < ws.length; k++) { ws[k].classList.toggle("done", k < lit.tw); ws[k].classList.toggle("on", k === lit.tw); }
-    lit.dw = lit.tw; lit.df = 0;
-    const w = ws[lit.dw], r = w.getBoundingClientRect();
-    if (r.top < 70 || r.bottom > innerHeight - 200) w.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (lit.dv >= 0 && lit.dv !== lit.tv) (wordEls[lit.dv] || []).forEach(unlight);
+    for (let k = 0; k < ws.length; k++) { ws[k].classList.toggle("done", k < lit.tw); if (k === lit.tw) ws[k].classList.add("on"); else unlight(ws[k]); }
+    lit.dv = lit.tv; lit.dw = lit.tw; lit.da = 0; lit.db = 0;
+    const w = ws[lit.dw], r = w && w.getBoundingClientRect();
+    if (r && (r.top < 70 || r.bottom > innerHeight - 200)) w.scrollIntoView({ block: "center", behavior: "smooth" });
   }
-  lit.df += (lit.tf - lit.df) * 0.3;
-  const w = wordEls[lit.dv] && wordEls[lit.dv][lit.dw];
-  if (w) w.style.setProperty("--f", lit.df.toFixed(3));
-  if (Math.abs(lit.tf - lit.df) > 0.004) lit.raf = requestAnimationFrame(frameLight);
+  const w = ws[lit.dw]; if (!w) return;
+  // a = partie déjà prononcée, b = fin de la lettre en cours (qui brille)
+  let A, B;
+  const g = lit.tl >= 0 ? glyphs(w) : null;
+  if (g && g[lit.tl]) { const [x0, x1] = g[lit.tl]; A = x0 + (x1 - x0) * lit.tlf; B = x1; }
+  else { A = lit.tf; B = Math.min(1, lit.tf + 0.15); }
+  lit.da += (A - lit.da) * 0.35; lit.db += (B - lit.db) * 0.35;
+  w.style.setProperty("--a", (lit.da * 100).toFixed(1) + "%");
+  w.style.setProperty("--b", (Math.max(lit.da, lit.db) * 100).toFixed(1) + "%");
+  if (Math.abs(A - lit.da) > 0.003 || Math.abs(B - lit.db) > 0.003) lit.raf = requestAnimationFrame(frameLight);
 }
-function finishLight(vi) { (wordEls[vi] || []).forEach(w => { w.classList.remove("on"); w.classList.add("done"); w.style.removeProperty("--f"); }); if (lit.tv === vi) { lit.tv = -1; lit.dv = -1; } }
+function finishLight(vi) { (wordEls[vi] || []).forEach(w => { unlight(w); w.classList.add("done"); }); if (lit.tv === vi) { lit.tv = -1; lit.dv = -1; } }
 function clearLight(keepTarget) {
-  wordEls.forEach(ws => ws.forEach(w => { w.classList.remove("on", "done"); w.style.removeProperty("--f"); }));
-  lit.dv = -1; lit.dw = -1; lit.df = 0;
+  wordEls.forEach(ws => ws.forEach(w => { unlight(w); w.classList.remove("done"); }));
+  lit.dv = -1; lit.dw = -1; lit.da = 0; lit.db = 0;
   if (!keepTarget) { lit.tv = -1; lit.tw = -1; }
 }
 
@@ -389,7 +428,7 @@ async function playFrom(vi) {
       const tick = () => {
         if (L.stop) return res();
         const f = (c.currentTime - t0) * 100;
-        if (f >= 0) { const wp = wordAtT(p.wt, f, total); if (wp.w >= 0) setTarget(v, wp.w, wp.f); }
+        if (f >= 0) { const wp = wordAtT(p.wt, f, total); if (wp.w >= 0) { const lt = letterIn(ltMap.get(keyOf(v)), wp.w, f); setTarget(v, wp.w, wp.f, lt.l, lt.lf); } }
         requestAnimationFrame(tick);
       };
       requestAnimationFrame(tick);
@@ -414,16 +453,13 @@ process(inp){const ch=inp[0]&&inp[0][0];if(ch){for(let i=0;i<ch.length;i++){this
 registerProcessor('miroir-capture',C);`;
 let workletReady = null;
 
-async function startRec() {
-  stopListen();
-  if (!S) return;
+// ouvre le micro ; renvoie de quoi le brancher au worker
+async function openMic(say) {
   const c = audioCtx(); if (c.resume) c.resume();
-  const btn = $("mic");
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setStatus("Ce navigateur ne donne pas accès au micro."); return; }
-  btn.classList.add("busy"); setStatus("Préparation…");
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { say("Ce navigateur ne donne pas accès au micro."); return null; }
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } }); }
-  catch (e) { btn.classList.remove("busy"); setStatus("Le micro est refusé. Autorise-le pour ce site dans les réglages du navigateur."); return; }
+  catch (e) { say("Le micro est refusé. Autorise-le pour ce site dans les réglages du navigateur."); return null; }
   const src = c.createMediaStreamSource(stream);
   const mute = c.createGain(); mute.gain.value = 0; mute.connect(c.destination);
   let node = null, port = null;
@@ -442,29 +478,163 @@ async function startRec() {
     node.onaudioprocess = ev => { if (!rec) return; const d = new Float32Array(ev.inputBuffer.getChannelData(0)); worker.postMessage({ t: "audio", data: d }, [d.buffer]); };
   }
   src.connect(node); node.connect(mute);
+  return { stream, src, node, mute, port, rate: c.sampleRate };
+}
+function closeMic(cap) { try { cap.src.disconnect(); cap.node.disconnect(); cap.mute.disconnect(); } catch (_) {} cap.stream.getTracks().forEach(t => t.stop()); }
+function sendToWorker(cap, msg) {
+  if (cap.port && !cap.portSent) { msg.port = cap.port; cap.portSent = true; worker.postMessage(msg, [cap.port]); }
+  else worker.postMessage(msg);
+}
+function micOn() { $("mic").classList.add("rec"); $("micIco").hidden = true; $("stopIco").hidden = false; }
+
+async function startRec() {
+  stopListen();
+  if (!S) return;
+  const btn = $("mic");
+  btn.classList.add("busy"); setStatus("Préparation…");
+  const cap = await openMic(setStatus);
   btn.classList.remove("busy");
-  if (H) { if (!inRange(cur)) cur = H.step === 2 ? H.link : H.from; resetRange(); }
+  if (!cap) return;
+  if (!S || rec) { closeMic(cap); return; }
+  // reconnaissance vocale prête : on écoute d'abord, elle trouve le passage, puis la lumière te suit
+  if (asrReady() && !calibMode && !H) { beginScan(cap, true); return; }
+  if (H && !inRange(cur)) cur = H.step === 2 ? H.link : H.from;
+  startSession(cap, { i: cur });
+}
+
+function startSession(cap, o) {
+  if (H) resetRange();
   if (!S.t0) S.t0 = Date.now();
-  rec = { stream, src, node, mute, vi: cur };
+  rec = cap; rec.vi = o.i; rec.scanning = false; rec.busy = false;
+  cur = o.i;
   clearLight();
   const voice = calibMode ? null : store.get("voice", null);
   const st = settings();
-  prepAround(cur);
+  prepAround(o.i);
   const others = st.multi && !calibMode ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => r.id) : [];
   const lim = H ? H.to + 1 : S.v.length;
-  const msg = { t: "start", keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: cur, rate: c.sampleRate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode };
-  if (port) { msg.port = port; worker.postMessage(msg, [port]); } else worker.postMessage(msg);
-  btn.classList.add("rec"); $("micIco").hidden = true; $("stopIco").hidden = false;
+  const msg = { t: "start", wc: S.v.slice(0, lim).map(V => V.w.length), keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: o.i, rate: cap.rate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode && !o.fromScan && !asrReady(), asr: asrReady() && !calibMode };
+  if (o.fromScan) msg.fromScan = o.fromScan;
+  sendToWorker(cap, msg);
+  micOn();
   $("restart").disabled = false;
+}
+
+// écoute sans savoir encore où il récite : les extraits partent à la reconnaissance vocale
+function beginScan(cap, inSurah) {
+  rec = cap; Object.assign(rec, { scanning: true, inSurah, tries: 0, pending: false, vi: cur });
+  const voice = store.get("voice", null);
+  sendToWorker(cap, { t: "scan", rate: cap.rate, floor: voice && voice.profile ? voice.profile.floor : null });
+  micOn();
+  scanSay(inSurah ? "Récite : je reconnais où tu en es…" : "Je t'écoute… récite quelques mots.");
+}
+function scanSay(t, kind) { const a = $("autoStatus"); if (rec && !rec.inSurah && a) a.textContent = t; else setStatus(t, kind); }
+
+function onSnippet(m) {
+  if (!rec || !asrReady()) return;
+  if (m.scan) {
+    if (!rec.scanning || rec.pending) return;
+    rec.pending = true;
+    const o = { end: m.end, from: m.from };
+    if (rec.inSurah && S && S.id) { o.surah = S.id; o.globalToo = true; o.near = { v: S.v[cur].n, w: 0 }; }
+    asrRun(m.x, o).then(res => { if (!rec || !rec.scanning) return; rec.pending = false; onScanResult(res, m); });
+  } else {
+    if (rec.scanning || rec.busy || !S || calibMode) return;
+    rec.busy = true;
+    const o = { end: m.end, from: m.from, surah: S.id, near: { v: S.v[rec.vi].n, w: Math.max(0, lit.tv === rec.vi ? lit.tw : 0) }, globalToo: !H };
+    asrRun(m.x, o).then(res => { if (!rec) return; rec.busy = false; onTrackResult(res, m); });
+  }
+}
+function onScanResult(res, m) {
+  if (res.busy) return;
+  if (res.error) { rec.tries++; if (rec.tries >= 2) scanFail("La reconnaissance vocale n'a pas fonctionné : " + res.error); return; }
+  let loc = res.loc && res.loc.sure ? res.loc : null;
+  if (!loc && res.global && res.global.sure) loc = res.global;
+  if (!loc) {
+    rec.tries++;
+    if (rec.inSurah && S && rec.tries >= 3) { setStatus("Passage pas encore reconnu : je pars du verset choisi."); startSession(rec, { i: cur, fromScan: { w: 0, at: m.from } }); return; }
+    if (!rec.inSurah && rec.tries >= 5) { scanFail("Je n'ai pas reconnu le passage.", res.loc || res.global); return; }
+    scanSay(rec.tries === 1 ? "Continue, j'écoute encore un peu…" : "Encore quelques mots…");
+    return;
+  }
+  const st = loc.start && loc.start.s === loc.s ? loc.start : loc;
+  rec.scanning = false;
+  rec.located = { s: st.s, v: st.v, w: st.w, vwords: st.vwords, at: m.from };
+  if (S && S.id === st.s && !calibMode) beginLocated();
+  else { scanSay(`Trouvé : ${surName(st.s)}, verset ${st.v}.`, "ok"); closeSheet(); location.hash = "s" + st.s; }
+}
+async function beginLocated() {
+  const L = rec && rec.located; if (!S || !L) return;
+  const vi = Math.max(0, Math.min(S.v.length - 1, L.v - 1));
+  const shown = S.v[vi].w.map(x => x[0]);
+  const w = L.w > 0 && L.vwords ? RihalSearch.mapWord(L.vwords, shown, L.w) : 0;
+  rec.located = null;
+  selectVerse(vi, true);
+  setStatus(`Trouvé : ${S.c.n}, verset ${S.v[vi].n}. Je te suis…`, "ok");
+  const st = settings(), others = st.multi ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => prepVerse(vi, r.id)) : [];
+  await Promise.race([Promise.all([prepVerse(vi), prepVerse(vi + 1), ...others]), new Promise(r => setTimeout(r, 9000))]);
+  if (!rec || !S) return;
+  startSession(rec, { i: vi, fromScan: { w, at: L.at } });
+}
+function scanFail(msg, loc) {
+  const fromHome = rec && !rec.inSurah;
+  stopRec();
+  if (!fromHome) { setStatus(msg); return; }
+  const body = openSheet("Passage non reconnu");
+  body.appendChild(el("p", "fix", msg + " Récite un peu plus fort ou plus près de la tablette, ou choisis la sourate dans la liste."));
+  const alts = (loc && loc.alts || []).filter(a => a.matched >= 2).slice(0, 3);
+  if (alts.length) {
+    body.appendChild(el("h3", "sub-h", "C'était peut-être"));
+    alts.forEach(a => { const b = el("button", "vrow"); b.appendChild(el("span", null, `${surName(a.s)}, verset ${a.v}`)); b.appendChild(el("span", "pill ok", "Ouvrir")); b.onclick = () => { closeSheet(); store.set("last", { s: a.s, v: a.v - 1 }); location.hash = "s" + a.s; }; body.appendChild(b); });
+  }
+  const again = el("button", "btn primary", "Réessayer"); again.onclick = () => { closeSheet(); startAuto(); }; body.appendChild(again);
+}
+function onTrackResult(res, m) {
+  if (!S || res.busy || res.error) return;
+  const loc = res.loc;
+  // on ne corrige que si les derniers mots entendus ont été retrouvés (sinon on ne sait pas où il en est maintenant)
+  if (loc && loc.sure && loc.s === S.id && loc.heard - 1 - loc.tEnd <= 1) {
+    const vi = loc.v - 1; if (vi < 0 || vi >= S.v.length) return;
+    if (H && !inRange(vi)) return;
+    const w = RihalSearch.mapWord(loc.vwords, S.v[vi].w.map(x => x[0]), loc.w);
+    prepVerse(vi).then(() => { if (rec && !rec.scanning) worker.postMessage({ t: "asrPos", i: vi, w, end: m.end }); });
+    $("suggest").hidden = true;
+  } else if (!H && res.global && res.global.sure && res.global.s !== S.id) {
+    const g = res.global, b = $("suggest");
+    b.textContent = `Tu récites ${surName(g.s)}, verset ${g.v} ? Y aller`;
+    b.hidden = false;
+    b.onclick = () => { b.hidden = true; stopRec(); store.set("last", { s: g.s, v: g.v - 1 }); pendingStart = true; location.hash = "s" + g.s; };
+  }
+}
+
+// depuis l'accueil : appuyer, réciter, Rihal trouve la sourate et le verset
+async function startAuto() {
+  if (rec) { stopRec(); return; }
+  if (!asrReady()) { openAsrSheet(); return; }
+  const body = openSheet("Réciter");
+  const live = el("div", "auto-live"); live.innerHTML = '<span class="auto-ring"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 14.5a3.5 3.5 0 0 0 3.5-3.5V5.5a3.5 3.5 0 1 0-7 0V11a3.5 3.5 0 0 0 3.5 3.5Zm6-3.5a1 1 0 1 0-2 0 4 4 0 0 1-8 0 1 1 0 1 0-2 0 6 6 0 0 0 5 5.91V19H8.5a1 1 0 1 0 0 2h7a1 1 0 1 0 0-2H13v-2.09A6 6 0 0 0 18 11Z"/></svg></span>';
+  body.appendChild(live);
+  const p = el("p", "auto-status", "Préparation du micro…"); p.id = "autoStatus"; body.appendChild(p);
+  body.appendChild(el("p", "h-note", "Récite normalement, à partir de n'importe quel verset. Dès que Rihal reconnaît le passage, la page s'ouvre et la lumière te suit."));
+  const stop = el("button", "btn", "Arrêter"); stop.onclick = () => { stopRec(); closeSheet(); }; body.appendChild(stop);
+  const cap = await openMic(t => { const a = $("autoStatus"); if (a) a.textContent = t; });
+  if (!cap) return;
+  if ($("sheet").hidden || rec) { closeMic(cap); return; }
+  beginScan(cap, false);
+}
+function meter(db) {
+  const v = Math.max(0, Math.min(1, (db + 62) / 42)).toFixed(2);
+  $("mic").style.setProperty("--lvl", v);
+  const r = document.querySelector(".auto-ring"); if (r) r.style.setProperty("--lvl", v);
 }
 
 function stopRec(fromWorker) {
   if (!rec) return;
   const r = rec; rec = null;
-  try { r.src.disconnect(); r.node.disconnect(); r.mute.disconnect(); } catch (_) {}
-  r.stream.getTracks().forEach(t => t.stop());
+  closeMic(r);
   if (!fromWorker) worker.postMessage({ t: "stop" });
-  $("mic").classList.remove("rec"); $("micIco").hidden = false; $("stopIco").hidden = true;
+  $("mic").classList.remove("rec"); $("micIco").hidden = false; $("stopIco").hidden = true; $("mic").style.removeProperty("--lvl");
+  if (r.scanning && !r.inSurah) { const a = $("autoStatus"); if (a) closeSheet(); }
   $("restart").disabled = true;
   veEls.forEach(v => v && v.classList.remove("st-run"));
   if (!calibMode && !H) setStatus("Arrêté. Touche « Bilan » pour voir tes corrections.");
@@ -473,6 +643,9 @@ function stopAll() { stopListen(); if (rec) stopRec(); }
 
 worker.onmessage = e => {
   const m = e.data;
+  if (m.t === "lvl") { if (rec) meter(m.db); return; }
+  if (m.t === "snippet") { onSnippet(m); return; }
+  if (m.t === "prepped" && m.lt) ltMap.set(m.key, m.lt);
   if (!S) return;
   switch (m.t) {
     case "verse": {
@@ -497,13 +670,22 @@ worker.onmessage = e => {
       break;
     case "goto":
       clearLight();
-      setStatus(m.w ? `Reprise au mot touché, verset ${S.v[m.i].n}.` : `On reprend le verset ${S.v[m.i].n} depuis le début.`, "ok");
+      if (rec) rec.vi = m.i;
+      if (m.asr) { selectVerse(m.i, true); setStatus(`Recalé grâce à ta voix : verset ${S.v[m.i].n}.`, "ok"); }
+      else setStatus(m.w ? `Reprise au mot touché, verset ${S.v[m.i].n}.` : `On reprend le verset ${S.v[m.i].n} depuis le début.`, "ok");
+      break;
+    case "skipped":
+      setStatus(`Tu es passé au verset ${S.v[m.to].n} : je te suis.`, "ok");
+      if (rec) rec.vi = m.to;
+      break;
+    case "caught":
+      setStatus(`Verset ${S.v[m.i].n} : je te suis.`, "ok");
       break;
     case "relock":
-      setStatus(m.next ? `Recalé : tu es au verset ${S.v[m.i].n}.` : m.back ? `Recalé : tu as repris plus haut dans le verset ${S.v[m.i].n}.` : "Recalé sur ta voix.", "ok");
+      if (S.v[m.i]) setStatus(m.next ? `Recalé : tu es au verset ${S.v[m.i].n}.` : m.back ? `Recalé : tu as repris plus haut dans le verset ${S.v[m.i].n}.` : m.asr ? "Recalé grâce à la reconnaissance de ta voix." : "Recalé sur ta voix.", "ok");
       break;
     case "pos":
-      if (rec && m.i === rec.vi && m.w >= 0) setTarget(m.i, m.w, m.f);
+      if (rec && m.i === rec.vi && m.w >= 0) setTarget(m.i, m.w, m.f, m.l, m.lf);
       break;
     case "madd": {
       if (!rec || m.i !== rec.vi) return;
@@ -650,7 +832,7 @@ function openRecPicker() {
 }
 
 function openSheet(title) { $("sheetTitle").textContent = title; $("sheetBody").textContent = ""; $("sheet").hidden = false; return $("sheetBody"); }
-function closeSheet() { $("sheet").hidden = true; }
+function closeSheet() { $("sheet").hidden = true; if (rec && rec.scanning && !rec.inSurah) stopRec(); }
 
 function openVerse(vi) {
   const res = results[vi];
@@ -1053,6 +1235,74 @@ function logFree() {
   S.t0 = Date.now();
 }
 
+/* ---------- reconnaissance vocale : modèle Whisper entraîné sur le Coran (Tarteel), dans le navigateur ---------- */
+const AS = { w: null, state: "off", device: "", loaded: 0, total: 0, id: 0, cb: new Map(), err: "" };
+const mockASR = () => typeof window.__RIHAL_MOCK_ASR === "function";
+const asrReady = () => AS.state === "ready";
+function asrInit() {
+  if (AS.w) return;
+  try { AS.w = new Worker("asr.js?v=7", { type: "module" }); }
+  catch (e) { AS.state = "error"; AS.err = "Ce navigateur ne permet pas la reconnaissance vocale."; asrUi(); return; }
+  AS.state = "loading"; asrUi();
+  AS.w.onmessage = e => {
+    const m = e.data;
+    if (m.t === "progress") { AS.loaded = m.loaded; AS.total = m.total; asrUi(); }
+    else if (m.t === "ready") { AS.state = "ready"; AS.device = m.device; asrUi(); }
+    else if (m.t === "error") { AS.state = "error"; AS.err = m.msg; AS.w.terminate(); AS.w = null; asrUi(); }
+    else if (m.t === "result") { const f = AS.cb.get(m.id); AS.cb.delete(m.id); if (f) f(m); }
+  };
+  AS.w.onerror = ev => { if (AS.state === "ready") return; AS.state = "error"; AS.err = (ev && ev.message) || "chargement impossible"; asrUi(); };
+  if (mockASR()) { AS.state = "ready"; AS.device = "test"; asrUi(); }
+  else AS.w.postMessage({ t: "init" });
+}
+function asrRun(x, o) {
+  return new Promise(res => {
+    if (!AS.w) { res({ error: "pas prête" }); return; }
+    const id = ++AS.id; AS.cb.set(id, res);
+    const msg = { t: "run", id, x, ...o };
+    if (mockASR()) msg.mockText = window.__RIHAL_MOCK_ASR(o.from / SR, o.end / SR);
+    AS.w.postMessage(msg, [x.buffer]);
+    setTimeout(() => { if (AS.cb.has(id)) { AS.cb.delete(id); res({ error: "trop lent" }); } }, 30000);
+  });
+}
+const mb = n => Math.round(n / 1e6);
+function asrUi() {
+  const box = $("asrCard"); if (!box) return;
+  box.textContent = "";
+  const t = el("div", "asr-t");
+  t.appendChild(el("b", null, "Reconnaissance automatique"));
+  const sub = el("span");
+  const acts = el("div", "acts");
+  if (AS.state === "ready") {
+    sub.textContent = `Prête ✓ — appuie sur « Réciter » ou sur le micro : Rihal trouve la sourate et le verset, puis te suit mot à mot.${AS.device === "webgpu" ? " (accélérée par la carte graphique)" : ""}`;
+    const off = el("button", "btn ghost", "Désactiver"); off.onclick = () => { saveSettings({ asr: false }); if (AS.w) AS.w.terminate(); AS.w = null; AS.state = "off"; asrUi(); }; acts.appendChild(off);
+  } else if (AS.state === "loading") {
+    sub.textContent = AS.total ? `Téléchargement du modèle : ${mb(AS.loaded)} / ${mb(AS.total)} Mo. Laisse la page ouverte, ça ne se fait qu'une fois.` : "Préparation du modèle…";
+    const bar = el("div", "h-prog"); const f = el("i"); f.style.width = (AS.total ? Math.max(2, AS.loaded / AS.total * 100) : 3).toFixed(1) + "%"; bar.appendChild(f); t.appendChild(sub); t.appendChild(bar);
+    box.appendChild(t); updateAutoBtn(); return;
+  } else if (AS.state === "error") {
+    sub.textContent = "Le modèle n'a pas pu se charger (" + AS.err + "). Vérifie ta connexion et réessaie. Le reste de l'application fonctionne normalement.";
+    const b = el("button", "btn primary", "Réessayer"); b.onclick = () => { AS.state = "off"; asrInit(); }; acts.appendChild(b);
+  } else {
+    sub.textContent = "Récite sans rien choisir : Rihal reconnaît la sourate, le verset et le mot, puis vérifie en continu qu'il te suit bien. Tout se passe sur ta tablette. Un seul téléchargement d'environ 80 à 120 Mo (Wi-Fi conseillé).";
+    const b = el("button", "btn primary", "Activer"); b.onclick = enableAsr; acts.appendChild(b);
+  }
+  t.appendChild(sub); box.appendChild(t); box.appendChild(acts);
+  box.classList.toggle("done", AS.state === "ready");
+  updateAutoBtn();
+}
+function enableAsr() { saveSettings({ asr: true }); asrInit(); asrUi(); }
+function openAsrSheet() {
+  const body = openSheet("Réciter sans choisir");
+  body.appendChild(el("p", "fix", "Pour reconnaître tout seul la sourate et le verset, Rihal utilise un petit modèle de reconnaissance vocale entraîné sur la récitation du Coran. Il fonctionne directement sur ta tablette, sans envoyer ta voix sur internet."));
+  body.appendChild(el("p", "fix", AS.state === "loading" ? "Il est en cours de téléchargement : tu peux suivre l'avancement sur l'accueil." : "Il faut le télécharger une seule fois (environ 80 à 120 Mo, Wi-Fi conseillé). Ensuite, il marche même hors connexion."));
+  if (AS.state !== "loading") { const b = el("button", "btn primary", AS.state === "error" ? "Réessayer le téléchargement" : "Télécharger et activer"); b.onclick = () => { closeSheet(); if (AS.state === "error") AS.state = "off"; enableAsr(); }; body.appendChild(b); }
+}
+function updateAutoBtn() {
+  const s = $("autoSub"); if (!s) return;
+  s.textContent = asrReady() ? "Appuie et récite : Rihal trouve la sourate et le verset." : AS.state === "loading" ? "Préparation de la reconnaissance vocale…" : "Active la reconnaissance automatique pour réciter sans choisir.";
+}
+
 /* ---------- navigation ---------- */
 function route() {
   logFree();
@@ -1084,6 +1334,7 @@ $("pages").addEventListener("click", e => {
   if (!listen && !calibMode) { selectVerse(+w.dataset.v); setStatus(`Départ : verset ${S.v[+w.dataset.v].n}. Touche le micro ou Écouter.`); }
 });
 $("mic").addEventListener("click", () => rec ? stopRec() : startRec());
+$("autoBtn").addEventListener("click", startAuto);
 $("listen").addEventListener("click", () => listen ? stopListen() : (S && playFrom(H ? (cur >= H.from && cur <= H.to ? cur : H.from) : cur)));
 $("report").addEventListener("click", openReport);
 $("restart").addEventListener("click", () => { if (rec) worker.postMessage({ t: "restart" }); });
@@ -1095,6 +1346,7 @@ $("sheet").addEventListener("click", e => { if (e.target === $("sheet")) closeSh
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
 window.addEventListener("hashchange", route);
 
+if (settings().asr || mockASR()) asrInit(); else asrUi();
 loadChapters().then(c => {
   chapters = c || COUNTS.map((n, i) => ({ id: i + 1, n: "Sourate " + (i + 1), a: "", fr: "", c: n }));
   if (!c) setTimeout(() => { const g = $("grid"); if (g) g.prepend(el("p", "empty", "Noms des sourates indisponibles hors ligne pour l'instant.")); }, 0);
