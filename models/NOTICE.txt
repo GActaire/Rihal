@@ -1,0 +1,15 @@
+Modèle de reconnaissance de la récitation utilisé par Rihal
+============================================================
+
+zipformer_a0w_ep1_a05.int8.onnx et zipformer_quran.json
+  - Modèle acoustique Zipformer2-CTC et lexique phonétique de Quran-Lab
+    (https://huggingface.co/Quran-Lab/zipformer_p-arabic-v3, auteur Muno459 / Quran-Lab),
+    affiné et publié par le projet Tilawa (https://github.com/yazinsai/tilawa,
+    publication « zipformer-a0w-ep1-a0.5 » et « v0.3.0 »).
+  - Licence : NPL-1.2 (texte complet dans NPL-1.2.txt). Usage gratuit uniquement,
+    partage à l'identique. Rihal est gratuit et ne fait rien payer.
+  - Fichiers redistribués tels quels, sans modification.
+
+Le moteur de recherche et de suivi (dossier tilawa/) est le code de @tilawa/core
+(https://github.com/yazinsai/tilawa/tree/main/packages/core), licence MIT,
+simplement converti de TypeScript en JavaScript.

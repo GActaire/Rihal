@@ -191,6 +191,7 @@
       else if (Math.abs(D[i][j] - (D[i - 1][j] + 1)) < 1e-4) { map[i - 1] = j - 1; i--; }
       else j--;
     }
+    if (k === "all") return map.map((r, i) => r >= 0 ? r : Math.round(i * (m - 1) / Math.max(1, n - 1)));
     const r = map[Math.max(0, Math.min(n - 1, k))];
     return r >= 0 ? r : Math.round(k * (m - 1) / Math.max(1, n - 1));
   }

@@ -1,13 +1,29 @@
 // Rihal — tout le calcul en arrière-plan : l'écran reste fluide.
-importScripts("engine.js?v=7");
+importScripts("engine.js?v=8");
 const E = self.MiroirEngine, SR = E.SR;
 const refs = new Map(); // "récitateur|verset" -> référence préparée
 let S = null;           // séance d'enregistrement en cours
 let SC = null;          // écoute avant de savoir où l'élève récite (le passage est cherché par la reconnaissance vocale)
+let P = null;           // canal vers la reconnaissance vocale (reco.js) : on lui passe le son à 16 kHz
+const toReco = (x, g) => { if (P) { const c = x.slice(); P.postMessage({ x: c, g }, [c.buffer]); } };
 
+// passage au 16 kHz : filtre passe-bas d'abord (sinon les aigus se replient et brouillent la reconnaissance), puis interpolation
 function resampler(rate) {
   const step = rate / SR; let t = 0, last = 0;
-  return input => {
+  const fc = 0.45 * SR / rate, N = rate > SR * 1.05 ? 32 : 0; // demi-longueur du filtre
+  const h = new Float32Array(2 * N + 1);
+  if (N) { let sum = 0; for (let k = -N; k <= N; k++) { const x = k === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * k) / (Math.PI * k); const w = 0.42 + 0.5 * Math.cos(Math.PI * k / (N + 1)) + 0.08 * Math.cos(2 * Math.PI * k / (N + 1)); h[k + N] = x * w; sum += x * w; } for (let k = 0; k < h.length; k++) h[k] /= sum; }
+  let hist = new Float32Array(2 * N); // fin du bloc précédent
+  const lp = input => {
+    if (!N) return input;
+    const x = new Float32Array(hist.length + input.length); x.set(hist); x.set(input, hist.length);
+    const out = new Float32Array(input.length); // retard de N échantillons, compensé à la longue (négligeable : < 1 ms)
+    for (let i = 0; i < input.length; i++) { let acc = 0; for (let k = 0; k < h.length; k++) acc += h[k] * x[i + k]; out[i] = acc; }
+    hist = x.slice(x.length - 2 * N);
+    return out;
+  };
+  return raw => {
+    const input = lp(raw);
     const out = new Float32Array(Math.max(0, Math.ceil((input.length - 1 - t) / step) + 1));
     let n = 0;
     while (t + 1 < input.length) {
@@ -77,10 +93,12 @@ self.onmessage = e => {
         if (S && !S.tracker && !S.silence && S.keys[S.i] === m.key) startTracker(true);
       } catch (err) { postMessage({ t: "prepFail", key: m.key }); }
       break;
+    case "asrPort": P = m.port; break;
     case "scan":
       S = null;
-      SC = { rate: m.rate, rs: resampler(m.rate), c16: [], cn: [], start: 0, g: 0, vad: vadNew(m.floor), next: 230 };
+      SC = { rate: m.rate, rs: resampler(m.rate), c16: [], cn: [], start: 0, g: 0, vad: vadNew(m.floor), next: 100 };
       if (m.port) m.port.onmessage = ev => audio(ev.data);
+      if (P) P.postMessage({ t: "begin" });
       break;
     case "start": {
       const sc = m.fromScan && SC ? SC : null;
@@ -92,9 +110,10 @@ self.onmessage = e => {
         lastPos: 0, voicedAt: 0, relockAt: 0,
         silence: m.calib ? { buf: [], need: 3 * SR, got: 0 } : null, silStats: null,
         all16: m.calib ? [] : null, ratios: { tabii: [], long: [], arid: [] }, reach: [], verses: 0,
-        asr: !!m.asr && !m.calib, ring: { c: [], start: 0 }, hist: [], wc: m.wc || null, vad: vadNew(m.profile ? m.profile.floor : null), snipAt: 320
+        asr: !!m.asr && !m.calib, ring: { c: [], start: 0 }, hist: [], wc: m.wc || null, disagree: null, anchorAt: -1e9, dbg: !!m.dbg
       };
       if (m.port) m.port.onmessage = ev => audio(ev.data);
+      if (S.asr && !sc && P) P.postMessage({ t: "begin" });
       if (S.silence) { postMessage({ t: "calibSilence", left: 3 }); break; }
       if (sc) {
         // on reprend tout ce qu'il a déjà récité pendant qu'on cherchait le passage, sans rien perdre
@@ -102,7 +121,7 @@ self.onmessage = e => {
         const ref = refs.get(S.keys[S.i]);
         const w = m.fromScan.w || 0;
         S.from = ref && w > 0 && ref.wt[w] ? Math.max(0, ref.wt[w][0] - 5) : 0;
-        S.samplesIn = at; S.ring.start = at; S.vad = sc.vad; S.vad.voiced = 0;
+        S.samplesIn = at; S.ring.start = at;
         startTracker(true);
         const k0 = sc.c16.length;
         let g = sc.start;
@@ -168,14 +187,9 @@ function scanAudio(native) {
   const g0 = SC.g;
   SC.c16.push(r); SC.cn.push(native); SC.g += r.length;
   while (SC.c16.length > 1 && SC.g - SC.start - SC.c16[0].length > 25 * SR) { SC.start += SC.c16[0].length; SC.c16.shift(); SC.cn.shift(); }
+  toReco(r, g0);
   vadFeed(SC.vad, r, g0);
-  if (SC.vad.voiced >= SC.next && SC.vad.first >= 0) {
-    SC.next += 170;
-    const from = Math.max(SC.start, SC.vad.first - Math.round(0.25 * SR), SC.g - 14 * SR);
-    const { a16 } = sliceChunks(SC.c16, null, SC.start, from, SC.g);
-    const x = new Float32Array(a16);
-    postMessage({ t: "snippet", scan: true, x, from, end: SC.g, voiced: SC.vad.voiced }, [x.buffer]);
-  }
+  if (SC.vad.voiced >= SC.next) { SC.next += 100; postMessage({ t: "voiced", s: SC.vad.voiced / 100 }); } // secondes de voix entendues
 }
 
 // un bloc de voix (déjà à 16 kHz) entre dans la séance ; replay = audio déjà enregistré qu'on rattrape
@@ -201,17 +215,8 @@ function feed(r, native, replay) {
   if (S.all16) S.all16.push(r);
   S.ring.c.push(r);
   { let tot = 0; for (const c of S.ring.c) tot += c.length; while (S.ring.c.length > 1 && tot - S.ring.c[0].length > 16 * SR) { tot -= S.ring.c[0].length; S.ring.start += S.ring.c[0].length; S.ring.c.shift(); } }
-  // de temps en temps, on envoie les dernières secondes à la reconnaissance vocale pour vérifier le suivi
-  if (S.asr && !replay) {
-    vadFeed(S.vad, r, g0);
-    if (S.vad.voiced >= S.snipAt) {
-      S.snipAt = S.vad.voiced + 240;
-      const from = Math.max(S.ring.start, S.samplesIn - 8 * SR);
-      const { a16 } = sliceChunks(S.ring.c, null, S.ring.start, from, S.samplesIn);
-      const x = new Float32Array(a16);
-      postMessage({ t: "snippet", x, from, end: S.samplesIn, i: S.i }, [x.buffer]);
-    }
-  }
+  // la reconnaissance vocale écoute en continu (dans son propre fil) et nous dit où il en est
+  if (S.asr && !replay) toReco(r, g0);
   const t = S.tracker;
   if (!t) return;
   t.push(r);
@@ -252,57 +257,67 @@ function feed(r, native, replay) {
 const bufLen = () => S.u16.reduce((s, a) => s + a.length, 0);
 
 // ===== Corrections venues de la reconnaissance vocale =====
-// m = { i: verset, w: dernier mot entendu, end: échantillon (global) où ce mot se termine }
+// m = { i: verset, w: mot entendu, cf: part du mot déjà dite (0..1), end: échantillon (global) où ce son a été entendu,
+//       ga: début (entendu) de ce verset }
+// La reconnaissance est fiable mais arrive avec ~0,7 s de retard ; le suivi par comparaison au récitateur est instantané
+// mais peut décrocher. On compare les deux AU MÊME INSTANT, et au moindre écart on recale le suivi sur la reconnaissance,
+// puis il rattrape tout seul les 0,7 s de retard avec le son déjà enregistré.
+const dbg = (...a) => { if (S && S.dbg) console.log("ASRPOS", ...a); };
 function asrPos(m) {
   if (!S || S.silence || !S.tracker) return;
   const ref = refs.get(S.keys[m.i]);
-  if (!ref || !ref.wt[m.w]) return;
+  if (!ref || !ref.wt[m.w]) { dbg("pas de référence", m.i, m.w); return; }
+  if (m.end <= S.anchorAt + 0.25 * SR) return; // déjà recalé après cet instant
   let h = null;
   for (let k = S.hist.length - 1; k >= 0; k--) if (S.hist[k][0] <= m.end) { h = S.hist[k]; break; }
   // écart en mots (d'un verset à l'autre) entre le suivi et la reconnaissance, au même instant
   const gpos = (i, w) => { if (!S.wc) return null; let k = 0; for (let x = 0; x < i; x++) k += S.wc[x] || 0; return k + w; };
+  const b = gpos(m.i, m.w);
   if (h) {
-    const a = gpos(h[1], h[2]), b = gpos(m.i, m.w);
-    if (a != null && b != null) { if (a - b >= -1 && a - b <= 2) return; }
-    else if (h[1] === m.i && Math.abs(h[2] - m.w) <= 1) return;
+    const a = gpos(h[1], h[2]);
+    // d'accord : même mot, ou le suivi a un mot d'avance (il entend en direct, la reconnaissance a du retard)
+    if (a != null && b != null ? a - b >= 0 && a - b <= 1 : h[1] === m.i && h[2] - m.w >= 0 && h[2] - m.w <= 1) return;
+    dbg("écart", (m.end / SR).toFixed(2), "suivi", h[1] + ":" + h[2], "reco", m.i + ":" + m.w, "verset en cours", S.i);
+    if (m.i < S.i && h[1] === m.i) return; // résultat arrivé trop tard : le suivi est déjà plus loin
   }
-  if (m.i < S.i && h && h[1] === m.i) return; // résultat arrivé trop tard : le suivi est déjà plus loin
+  S.anchorAt = m.end;
   if (m.i === S.i) {
-    reanchor(m.w, m.end);
+    reanchor(m.w, m.end, true, m.cf);
   } else if (m.i === S.i + 1) {
-    // il est déjà dans le verset suivant : on clôt celui-ci à l'endroit estimé où le suivant a commencé
-    const dur = (ref.wt[m.w][1] - ref.wt[0][0]) * 160 * 1.15;
+    // il est déjà dans le verset suivant : on clôt celui-ci là où la reconnaissance a entendu le début du suivant
     const vb = S.samplesIn - bufLen();
-    const cut = Math.round(m.end - dur - vb);
+    let cut = m.ga != null ? Math.round(m.ga - vb - 0.12 * SR) : -1;
+    if (cut < SR * 0.8 || cut > bufLen()) { const dur = (ref.wt[m.w][1] - ref.wt[0][0]) * 160 * 1.15; cut = Math.round(m.end - dur - vb); }
     if (cut < SR * 0.8) return;
     endVerse(true, cut);
     postMessage({ t: "relock", i: S ? S.i : m.i, next: true, asr: true });
-    if (S && S.i === m.i && S.tracker) reanchor(m.w, m.end, true);
+    if (S && S.i === m.i && S.tracker) reanchor(m.w, m.end, true, m.cf);
   } else {
     // ailleurs dans la sourate (retour en arrière, verset sauté) : on repart de là
-    jumpVerse(m.i, m.w, m.end);
+    jumpVerse(m.i, m.w, m.ga != null && m.w <= 1 ? m.ga : m.end, m.ga != null && m.w <= 1);
   }
 }
-// relance le suivi du verset en cours : à l'échantillon endG, l'élève finissait le mot w
-function reanchor(w, endG, quiet) {
+// relance le suivi du verset en cours : à l'échantillon endG, l'élève en était au mot w (part cf du mot)
+function reanchor(w, endG, quiet, cf) {
   const ref = refs.get(S.keys[S.i]); if (!ref) return;
   const vb = S.samplesIn - bufLen();
-  const off = Math.max(0, Math.round(endG - vb - 0.3 * SR));
+  const off = Math.max(0, Math.round(endG - vb - (cf != null ? 0.1 : 0.3) * SR));
   const lv = S.tracker && S.tracker.levels; if (lv) S.levels = lv;
   const i = S.i;
   S.tracker = E.LiveTracker(ref, ev => onEv(i, ev), S.profile, S.bias, S.levels);
-  S.tracker.jumpTo(Math.max(ref.wt[w][0], ref.wt[w][1] - 30));
+  const [w0, w1] = ref.wt[w];
+  S.tracker.jumpTo(cf != null ? Math.round(w0 + Math.min(0.9, cf) * (w1 - w0)) : Math.max(w0, w1 - 30));
   S.tracker.push(concat(S.u16).subarray(off));
   S.lastPos = S.tracker.posFrame; S.voicedAt = S.tracker.voicedFrames; S.relockAt = S.tracker.voicedFrames; S.nearEnd = 0; S.pend = null;
   if (!quiet) postMessage({ t: "relock", i: S.i, asr: true });
 }
-function jumpVerse(i, w, endG) {
+function jumpVerse(i, w, endG, atStart) {
   if (i < 0 || i >= S.keys.length) return;
   const ref = refs.get(S.keys[i]); if (!ref) return;
-  const from = Math.max(S.ring.start, Math.round(endG - 0.3 * SR));
+  const from = Math.max(S.ring.start, Math.round(endG - (atStart ? 0.15 : 0.3) * SR));
   const { a16 } = sliceChunks(S.ring.c, null, S.ring.start, from, S.samplesIn);
   S.i = i; S.u16 = [new Float32Array(a16)]; S.native = []; S.located = true;
-  S.from = Math.max(0, Math.max(ref.wt[w][0], ref.wt[w][1] - 30) - 5);
+  S.from = atStart ? 0 : Math.max(0, Math.max(ref.wt[w][0], ref.wt[w][1] - 30) - 5);
   startTracker(true);
   postMessage({ t: "goto", i, w, asr: true });
 }
@@ -453,6 +468,7 @@ function finish() {
 
 function stop() {
   SC = null;
+  if (P) P.postMessage({ t: "end" });
   if (!S) { postMessage({ t: "finished" }); return; }
   if (!S.silence && S.tracker && S.tracker.started && S.u16.reduce((s, a) => s + a.length, 0) > SR * 0.8) endVerse(false);
   finish();

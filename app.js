@@ -36,7 +36,7 @@ const saveSettings = p => store.set("settings", { ...settings(), ...p });
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null, pendingStart = false;
-const worker = new Worker("worker.js?v=7");
+const worker = new Worker("worker.js?v=8");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -513,8 +513,9 @@ function startSession(cap, o) {
   prepAround(o.i);
   const others = st.multi && !calibMode ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => r.id) : [];
   const lim = H ? H.to + 1 : S.v.length;
-  const msg = { t: "start", wc: S.v.slice(0, lim).map(V => V.w.length), keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: o.i, rate: cap.rate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode && !o.fromScan && !asrReady(), asr: asrReady() && !calibMode };
+  const msg = { t: "start", wc: S.v.slice(0, lim).map(V => V.w.length), keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: o.i, rate: cap.rate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode && !o.fromScan && !asrReady(), asr: asrReady() && !calibMode, dbg: !!window.__RIHAL_ORT_URL };
   if (o.fromScan) msg.fromScan = o.fromScan;
+  if (msg.asr) recoHint(S.id, o.i);
   sendToWorker(cap, msg);
   micOn();
   $("restart").disabled = false;
@@ -522,7 +523,8 @@ function startSession(cap, o) {
 
 // écoute sans savoir encore où il récite : les extraits partent à la reconnaissance vocale
 function beginScan(cap, inSurah) {
-  rec = cap; Object.assign(rec, { scanning: true, inSurah, tries: 0, pending: false, vi: cur });
+  rec = cap; Object.assign(rec, { scanning: true, inSurah, vi: cur });
+  recoHint(inSurah && S ? S.id : 0, cur);
   const voice = store.get("voice", null);
   sendToWorker(cap, { t: "scan", rate: cap.rate, floor: voice && voice.profile ? voice.profile.floor : null });
   micOn();
@@ -530,45 +532,31 @@ function beginScan(cap, inSurah) {
 }
 function scanSay(t, kind) { const a = $("autoStatus"); if (rec && !rec.inSurah && a) a.textContent = t; else setStatus(t, kind); }
 
-function onSnippet(m) {
-  if (!rec || !asrReady()) return;
-  if (m.scan) {
-    if (!rec.scanning || rec.pending) return;
-    rec.pending = true;
-    const o = { end: m.end, from: m.from };
-    if (rec.inSurah && S && S.id) { o.surah = S.id; o.globalToo = true; o.near = { v: S.v[cur].n, w: 0 }; }
-    asrRun(m.x, o).then(res => { if (!rec || !rec.scanning) return; rec.pending = false; onScanResult(res, m); });
-  } else {
-    if (rec.scanning || rec.busy || !S || calibMode) return;
-    rec.busy = true;
-    const o = { end: m.end, from: m.from, surah: S.id, near: { v: S.v[rec.vi].n, w: Math.max(0, lit.tv === rec.vi ? lit.tw : 0) }, globalToo: !H };
-    asrRun(m.x, o).then(res => { if (!rec) return; rec.busy = false; onTrackResult(res, m); });
-  }
-}
-function onScanResult(res, m) {
-  if (res.busy) return;
-  if (res.error) { rec.tries++; if (rec.tries >= 2) scanFail("La reconnaissance vocale n'a pas fonctionné : " + res.error); return; }
-  let loc = res.loc && res.loc.sure ? res.loc : null;
-  if (!loc && res.global && res.global.sure) loc = res.global;
-  if (!loc) {
-    rec.tries++;
-    if (rec.inSurah && S && rec.tries >= 3) { setStatus("Passage pas encore reconnu : je pars du verset choisi."); startSession(rec, { i: cur, fromScan: { w: 0, at: m.from } }); return; }
-    if (!rec.inSurah && rec.tries >= 5) { scanFail("Je n'ai pas reconnu le passage.", res.loc || res.global); return; }
-    scanSay(rec.tries === 1 ? "Continue, j'écoute encore un peu…" : "Encore quelques mots…");
+// la reconnaissance vocale a trouvé où il récite
+function onLocated(m) {
+  if (rec.scanning) {
+    rec.scanning = false;
+    rec.located = { s: m.s, v: m.a, w: m.w, aw: m.aw, at: Math.max(0, m.g0 - Math.round(0.25 * SR)) };
+    if (S && S.id === m.s && !calibMode) beginLocated();
+    else { scanSay(`Trouvé : ${surName(m.s)}, verset ${m.a}.`, "ok"); closeSheet(); location.hash = "s" + m.s; }
     return;
   }
-  const st = loc.start && loc.start.s === loc.s ? loc.start : loc;
-  rec.scanning = false;
-  rec.located = { s: st.s, v: st.v, w: st.w, vwords: st.vwords, at: m.from };
-  if (S && S.id === st.s && !calibMode) beginLocated();
-  else { scanSay(`Trouvé : ${surName(st.s)}, verset ${st.v}.`, "ok"); closeSheet(); location.hash = "s" + st.s; }
+  if (S && S.id && m.s !== S.id && !H && !calibMode) suggestSurah(m.s, m.a);
+}
+// pendant l'écoute : s'il n'est toujours pas reconnu après un moment
+function onScanVoiced(sec) {
+  if (!rec || !rec.scanning) return;
+  if (rec.inSurah && S && sec >= 14) { setStatus("Passage pas encore reconnu : je pars du verset choisi, et je me recalerai dès que je te reconnais."); startSession(rec, { i: cur, fromScan: { w: 0, at: 0 } }); return; }
+  if (!rec.inSurah && sec >= 24) { scanFail("Je n'ai pas reconnu le passage."); return; }
+  if (sec === 7) scanSay("Continue, j'écoute encore un peu…");
+  else if (sec === 15) scanSay("Encore quelques mots…");
 }
 async function beginLocated() {
   const L = rec && rec.located; if (!S || !L) return;
   const vi = Math.max(0, Math.min(S.v.length - 1, L.v - 1));
   const shown = S.v[vi].w.map(x => x[0]);
-  const w = L.w > 0 && L.vwords ? RihalSearch.mapWord(L.vwords, shown, L.w) : 0;
-  rec.located = null;
+  const w = L.w > 0 && L.aw && L.aw.length ? RihalSearch.mapWord(L.aw, shown, L.w) : 0;
+  rec.located = null; rec.vi = vi;
   selectVerse(vi, true);
   setStatus(`Trouvé : ${S.c.n}, verset ${S.v[vi].n}. Je te suis…`, "ok");
   const st = settings(), others = st.multi ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => prepVerse(vi, r.id)) : [];
@@ -576,35 +564,38 @@ async function beginLocated() {
   if (!rec || !S) return;
   startSession(rec, { i: vi, fromScan: { w, at: L.at } });
 }
-function scanFail(msg, loc) {
+function scanFail(msg) {
   const fromHome = rec && !rec.inSurah;
   stopRec();
   if (!fromHome) { setStatus(msg); return; }
   const body = openSheet("Passage non reconnu");
   body.appendChild(el("p", "fix", msg + " Récite un peu plus fort ou plus près de la tablette, ou choisis la sourate dans la liste."));
-  const alts = (loc && loc.alts || []).filter(a => a.matched >= 2).slice(0, 3);
-  if (alts.length) {
-    body.appendChild(el("h3", "sub-h", "C'était peut-être"));
-    alts.forEach(a => { const b = el("button", "vrow"); b.appendChild(el("span", null, `${surName(a.s)}, verset ${a.v}`)); b.appendChild(el("span", "pill ok", "Ouvrir")); b.onclick = () => { closeSheet(); store.set("last", { s: a.s, v: a.v - 1 }); location.hash = "s" + a.s; }; body.appendChild(b); });
-  }
   const again = el("button", "btn primary", "Réessayer"); again.onclick = () => { closeSheet(); startAuto(); }; body.appendChild(again);
 }
-function onTrackResult(res, m) {
-  if (!S || res.busy || res.error) return;
-  const loc = res.loc;
-  // on ne corrige que si les derniers mots entendus ont été retrouvés (sinon on ne sait pas où il en est maintenant)
-  if (loc && loc.sure && loc.s === S.id && loc.heard - 1 - loc.tEnd <= 1) {
-    const vi = loc.v - 1; if (vi < 0 || vi >= S.v.length) return;
-    if (H && !inRange(vi)) return;
-    const w = RihalSearch.mapWord(loc.vwords, S.v[vi].w.map(x => x[0]), loc.w);
-    prepVerse(vi).then(() => { if (rec && !rec.scanning) worker.postMessage({ t: "asrPos", i: vi, w, end: m.end }); });
-    $("suggest").hidden = true;
-  } else if (!H && res.global && res.global.sure && res.global.s !== S.id) {
-    const g = res.global, b = $("suggest");
-    b.textContent = `Tu récites ${surName(g.s)}, verset ${g.v} ? Y aller`;
-    b.hidden = false;
-    b.onclick = () => { b.hidden = true; stopRec(); store.set("last", { s: g.s, v: g.v - 1 }); pendingStart = true; location.hash = "s" + g.s; };
-  }
+// pendant la récitation : la reconnaissance dit où il en est (avec ~0,7 s de retard) ; le suivi s'y recale si besoin
+const wmaps = new Map();
+function wordMap(s, a) {
+  const k = s + ":" + a; if (wmaps.has(k)) return wmaps.get(k);
+  const aw = awCache.get(k), V = S && S.id === s ? S.v[a - 1] : null;
+  if (!aw || !aw.length || !V) return null;
+  const mp = RihalSearch.mapWord(aw, V.w.map(x => x[0]), "all");
+  wmaps.set(k, mp); return mp;
+}
+function onRecoPos(m) {
+  if (rec.scanning || rec.located || !S || !S.id || calibMode || m.lost) return;
+  if (m.s !== S.id) { if (!H) suggestSurah(m.s, m.a); return; }
+  $("suggest").hidden = true;
+  const vi = m.a - 1; if (vi < 0 || vi >= S.v.length) return;
+  if (H && !inRange(vi)) return;
+  const mp = wordMap(m.s, m.a);
+  const w = mp ? mp[Math.min(m.w, mp.length - 1)] : Math.min(m.w, S.v[vi].w.length - 1);
+  prepVerse(vi).then(() => { if (rec && !rec.scanning && S && S.id === m.s) worker.postMessage({ t: "asrPos", i: vi, w, cf: m.cf, end: m.g, ga: m.ga }); });
+}
+function suggestSurah(s, a) {
+  const b = $("suggest");
+  b.textContent = `Tu récites ${surName(s)}, verset ${a} ? Y aller`;
+  b.hidden = false;
+  b.onclick = () => { b.hidden = true; stopRec(); store.set("last", { s, v: a - 1 }); pendingStart = true; location.hash = "s" + s; };
 }
 
 // depuis l'accueil : appuyer, réciter, Rihal trouve la sourate et le verset
@@ -644,7 +635,7 @@ function stopAll() { stopListen(); if (rec) stopRec(); }
 worker.onmessage = e => {
   const m = e.data;
   if (m.t === "lvl") { if (rec) meter(m.db); return; }
-  if (m.t === "snippet") { onSnippet(m); return; }
+  if (m.t === "voiced") { onScanVoiced(m.s); return; }
   if (m.t === "prepped" && m.lt) ltMap.set(m.key, m.lt);
   if (!S) return;
   switch (m.t) {
@@ -671,7 +662,7 @@ worker.onmessage = e => {
     case "goto":
       clearLight();
       if (rec) rec.vi = m.i;
-      if (m.asr) { selectVerse(m.i, true); setStatus(`Recalé grâce à ta voix : verset ${S.v[m.i].n}.`, "ok"); }
+      if (m.asr) { selectVerse(m.i, true); setStatus(`Tu récites le verset ${S.v[m.i].n} : je te suis.`, "ok"); }
       else setStatus(m.w ? `Reprise au mot touché, verset ${S.v[m.i].n}.` : `On reprend le verset ${S.v[m.i].n} depuis le début.`, "ok");
       break;
     case "skipped":
@@ -682,6 +673,7 @@ worker.onmessage = e => {
       setStatus(`Verset ${S.v[m.i].n} : je te suis.`, "ok");
       break;
     case "relock":
+      if (m.asr) { if (m.next && S.v[m.i]) setStatus(`Verset ${S.v[m.i].n} : je te suis.`, "ok"); break; }
       if (S.v[m.i]) setStatus(m.next ? `Recalé : tu es au verset ${S.v[m.i].n}.` : m.back ? `Recalé : tu as repris plus haut dans le verset ${S.v[m.i].n}.` : m.asr ? "Recalé grâce à la reconnaissance de ta voix." : "Recalé sur ta voix.", "ok");
       break;
     case "pos":
@@ -1235,35 +1227,36 @@ function logFree() {
   S.t0 = Date.now();
 }
 
-/* ---------- reconnaissance vocale : modèle Whisper entraîné sur le Coran (Tarteel), dans le navigateur ---------- */
-const AS = { w: null, state: "off", device: "", loaded: 0, total: 0, id: 0, cb: new Map(), err: "" };
-const mockASR = () => typeof window.__RIHAL_MOCK_ASR === "function";
+/* ---------- reconnaissance vocale (reco.js) : modèle entraîné sur des dizaines de milliers de récitations, sur l'appareil ---------- */
+const AS = { w: null, state: "off", loaded: 0, total: 0, err: "", step: "" };
 const asrReady = () => AS.state === "ready";
+const awCache = new Map(); // "sourate:verset" -> mots du verset tels que le modèle les connaît
 function asrInit() {
   if (AS.w) return;
-  try { AS.w = new Worker("asr.js?v=7", { type: "module" }); }
-  catch (e) { AS.state = "error"; AS.err = "Ce navigateur ne permet pas la reconnaissance vocale."; asrUi(); return; }
-  AS.state = "loading"; asrUi();
-  AS.w.onmessage = e => {
-    const m = e.data;
-    if (m.t === "progress") { AS.loaded = m.loaded; AS.total = m.total; asrUi(); }
-    else if (m.t === "ready") { AS.state = "ready"; AS.device = m.device; asrUi(); }
-    else if (m.t === "error") { AS.state = "error"; AS.err = m.msg; AS.w.terminate(); AS.w = null; asrUi(); }
-    else if (m.t === "result") { const f = AS.cb.get(m.id); AS.cb.delete(m.id); if (f) f(m); }
-  };
-  AS.w.onerror = ev => { if (AS.state === "ready") return; AS.state = "error"; AS.err = (ev && ev.message) || "chargement impossible"; asrUi(); };
-  if (mockASR()) { AS.state = "ready"; AS.device = "test"; asrUi(); }
-  else AS.w.postMessage({ t: "init" });
+  try { AS.w = new Worker("reco.js?v=8", { type: "module" }); }
+  catch (e) { AS.state = "error"; AS.err = "ce navigateur ne permet pas la reconnaissance vocale"; asrUi(); return; }
+  AS.state = "loading"; AS.loaded = 0; AS.total = 0; AS.step = ""; asrUi();
+  // le son part directement du fil d'analyse vers la reconnaissance, sans passer par l'écran
+  const ch = new MessageChannel();
+  worker.postMessage({ t: "asrPort", port: ch.port1 }, [ch.port1]);
+  AS.w.postMessage({ t: "port", port: ch.port2 }, [ch.port2]);
+  AS.w.onmessage = e => onReco(e.data);
+  AS.w.onerror = ev => { if (AS.state === "ready") return; AS.state = "error"; AS.err = (ev && ev.message) || "chargement impossible"; if (AS.w) AS.w.terminate(); AS.w = null; asrUi(); };
+  AS.w.postMessage({ t: "init", ortUrl: window.__RIHAL_ORT_URL || null });
 }
-function asrRun(x, o) {
-  return new Promise(res => {
-    if (!AS.w) { res({ error: "pas prête" }); return; }
-    const id = ++AS.id; AS.cb.set(id, res);
-    const msg = { t: "run", id, x, ...o };
-    if (mockASR()) msg.mockText = window.__RIHAL_MOCK_ASR(o.from / SR, o.end / SR);
-    AS.w.postMessage(msg, [x.buffer]);
-    setTimeout(() => { if (AS.cb.has(id)) { AS.cb.delete(id); res({ error: "trop lent" }); } }, 30000);
-  });
+function asrOff() { if (AS.w) AS.w.terminate(); AS.w = null; AS.state = "off"; worker.postMessage({ t: "asrPort" }); }
+function recoHint(s, vi) { if (AS.w) AS.w.postMessage({ t: "hint", s: s || 0, a: (vi || 0) + 1 }); }
+function onReco(m) {
+  if (m.t === "progress") { AS.loaded = m.loaded; AS.total = m.total; AS.step = m.step || ""; asrUi(); return; }
+  if (m.t === "ready") { AS.state = "ready"; asrUi(); return; }
+  if (m.t === "error") { asrOff(); AS.state = "error"; AS.err = m.msg; asrUi(); return; }
+  if (m.t === "perf") { AS.speed = m.x; asrUi(); return; }
+  if (m.t === "slow") { if (rec) setStatus("Ta tablette a du mal à suivre la reconnaissance : je me recale sur le son récent.", "court"); return; }
+  if (m.t === "fail") { if (rec && rec.scanning) scanFail("La reconnaissance vocale s'est arrêtée (" + m.msg + ")."); return; }
+  if (m.aw && m.aw.length) awCache.set(m.s + ":" + m.a, m.aw);
+  if (!rec) return;
+  if (m.t === "loc") onLocated(m);
+  else if (m.t === "pos") onRecoPos(m);
 }
 const mb = n => Math.round(n / 1e6);
 function asrUi() {
@@ -1274,17 +1267,17 @@ function asrUi() {
   const sub = el("span");
   const acts = el("div", "acts");
   if (AS.state === "ready") {
-    sub.textContent = `Prête ✓ — appuie sur « Réciter » ou sur le micro : Rihal trouve la sourate et le verset, puis te suit mot à mot.${AS.device === "webgpu" ? " (accélérée par la carte graphique)" : ""}`;
-    const off = el("button", "btn ghost", "Désactiver"); off.onclick = () => { saveSettings({ asr: false }); if (AS.w) AS.w.terminate(); AS.w = null; AS.state = "off"; asrUi(); }; acts.appendChild(off);
+    sub.textContent = "Prête ✓ — appuie sur « Réciter » ou sur le micro : Rihal trouve la sourate et le verset, puis te suit mot à mot." + (AS.speed ? ` (Calcul ${AS.speed}× plus rapide que ta voix sur cet appareil.)` : "");
+    const off = el("button", "btn ghost", "Désactiver"); off.onclick = () => { saveSettings({ asr: false }); asrOff(); asrUi(); }; acts.appendChild(off);
   } else if (AS.state === "loading") {
-    sub.textContent = AS.total ? `Téléchargement du modèle : ${mb(AS.loaded)} / ${mb(AS.total)} Mo. Laisse la page ouverte, ça ne se fait qu'une fois.` : "Préparation du modèle…";
+    sub.textContent = AS.step === "engine" ? "Mise en route du moteur de reconnaissance…" : AS.total ? `Téléchargement du modèle : ${mb(AS.loaded)} / ${mb(AS.total)} Mo. Laisse la page ouverte, ça ne se fait qu'une fois.` : "Préparation du modèle…";
     const bar = el("div", "h-prog"); const f = el("i"); f.style.width = (AS.total ? Math.max(2, AS.loaded / AS.total * 100) : 3).toFixed(1) + "%"; bar.appendChild(f); t.appendChild(sub); t.appendChild(bar);
     box.appendChild(t); updateAutoBtn(); return;
   } else if (AS.state === "error") {
     sub.textContent = "Le modèle n'a pas pu se charger (" + AS.err + "). Vérifie ta connexion et réessaie. Le reste de l'application fonctionne normalement.";
     const b = el("button", "btn primary", "Réessayer"); b.onclick = () => { AS.state = "off"; asrInit(); }; acts.appendChild(b);
   } else {
-    sub.textContent = "Récite sans rien choisir : Rihal reconnaît la sourate, le verset et le mot, puis vérifie en continu qu'il te suit bien. Tout se passe sur ta tablette. Un seul téléchargement d'environ 80 à 120 Mo (Wi-Fi conseillé).";
+    sub.textContent = "Récite sans rien choisir : Rihal reconnaît la sourate, le verset et le mot, puis vérifie en continu qu'il te suit bien. Tout se passe sur ta tablette. Un seul téléchargement d'environ 85 Mo (Wi-Fi conseillé).";
     const b = el("button", "btn primary", "Activer"); b.onclick = enableAsr; acts.appendChild(b);
   }
   t.appendChild(sub); box.appendChild(t); box.appendChild(acts);
@@ -1294,8 +1287,9 @@ function asrUi() {
 function enableAsr() { saveSettings({ asr: true }); asrInit(); asrUi(); }
 function openAsrSheet() {
   const body = openSheet("Réciter sans choisir");
-  body.appendChild(el("p", "fix", "Pour reconnaître tout seul la sourate et le verset, Rihal utilise un petit modèle de reconnaissance vocale entraîné sur la récitation du Coran. Il fonctionne directement sur ta tablette, sans envoyer ta voix sur internet."));
-  body.appendChild(el("p", "fix", AS.state === "loading" ? "Il est en cours de téléchargement : tu peux suivre l'avancement sur l'accueil." : "Il faut le télécharger une seule fois (environ 80 à 120 Mo, Wi-Fi conseillé). Ensuite, il marche même hors connexion."));
+  body.appendChild(el("p", "fix", "Pour reconnaître tout seul la sourate et le verset, Rihal utilise un modèle de reconnaissance entraîné sur des dizaines de milliers de récitations : récitateurs connus, mais aussi débutants enregistrés au téléphone. Il fonctionne directement sur ta tablette, sans envoyer ta voix sur internet."));
+  body.appendChild(el("p", "fix", AS.state === "loading" ? "Il est en cours de téléchargement : tu peux suivre l'avancement sur l'accueil." : "Il faut le télécharger une seule fois (environ 85 Mo, Wi-Fi conseillé). Ensuite, il marche même hors connexion."));
+  body.appendChild(el("p", "h-note", "Modèle : Quran-Lab, affiné par le projet libre Tilawa (licence NPL-1.2, usage gratuit)."));
   if (AS.state !== "loading") { const b = el("button", "btn primary", AS.state === "error" ? "Réessayer le téléchargement" : "Télécharger et activer"); b.onclick = () => { closeSheet(); if (AS.state === "error") AS.state = "off"; enableAsr(); }; body.appendChild(b); }
 }
 function updateAutoBtn() {
@@ -1346,7 +1340,7 @@ $("sheet").addEventListener("click", e => { if (e.target === $("sheet")) closeSh
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeSheet(); });
 window.addEventListener("hashchange", route);
 
-if (settings().asr || mockASR()) asrInit(); else asrUi();
+if (settings().asr || window.__RIHAL_ORT_URL) asrInit(); else asrUi();
 loadChapters().then(c => {
   chapters = c || COUNTS.map((n, i) => ({ id: i + 1, n: "Sourate " + (i + 1), a: "", fr: "", c: n }));
   if (!c) setTimeout(() => { const g = $("grid"); if (g) g.prepend(el("p", "empty", "Noms des sourates indisponibles hors ligne pour l'instant.")); }, 0);
