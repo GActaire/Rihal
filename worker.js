@@ -1,5 +1,5 @@
 // Rihal — tout le calcul en arrière-plan : l'écran reste fluide.
-importScripts("engine.js?v=8");
+importScripts("engine.js?v=9");
 const E = self.MiroirEngine, SR = E.SR;
 const refs = new Map(); // "récitateur|verset" -> référence préparée
 let S = null;           // séance d'enregistrement en cours
@@ -158,7 +158,9 @@ function startTracker(keepAudio) {
 function onEv(i, ev) {
   if (!S || S.i !== i) return;
   if (ev.type === "pos") {
-    postMessage({ t: "pos", i, w: ev.w, f: ev.wf, l: ev.l, lf: ev.lf, frac: ev.frac });
+    const back = S.litI === i && ev.w < S.litW; // il a repris plus haut dans le verset : la lumière doit revenir
+    S.litI = i; S.litW = ev.w;
+    postMessage({ t: "pos", i, w: ev.w, f: ev.wf, l: ev.l, lf: ev.lf, frac: ev.frac, back });
     S.hist.push([S.samplesIn, i, ev.w]); if (S.hist.length > 600) S.hist.splice(0, 100);
   }
   else if (ev.type === "madd") postMessage({ t: "madd", i, kind: ev.kind, ratio: ev.ratio, w: ev.target.w, type: ev.target.type, syl: ev.target.syl });
@@ -280,6 +282,17 @@ function asrPos(m) {
     dbg("écart", (m.end / SR).toFixed(2), "suivi", h[1] + ":" + h[2], "reco", m.i + ":" + m.w, "verset en cours", S.i);
     if (m.i < S.i && h[1] === m.i) return; // résultat arrivé trop tard : le suivi est déjà plus loin
   }
+  // fin du verset précédent entendue juste avant qu'on passe au suivant : résultat en retard, pas une reprise
+  if (m.i === S.i - 1 && S.wc && m.w >= (S.wc[m.i] || 0) - 3 && m.end < (S.verseAt || 0) + 0.9 * SR) { dbg("retard ignoré", m.i + ":" + m.w); return; }
+  if (m.i !== S.i && !confirmOther(m)) { dbg("refusé", m.i + ":" + m.w, "le son ressemble plus au verset", S.i); return; }
+  // retour en arrière (il répète un verset ou reprend plus haut) : on attend une 2e confirmation de la reconnaissance,
+  // pour ne pas faire reculer la lumière sur une simple hésitation
+  const backward = m.i < S.i || (m.i === S.i && h && h[1] === S.i && m.w < h[2] - 1);
+  if (backward) {
+    const c = S.backClaim;
+    if (!c || c.i !== m.i || m.end - c.end > 1.6 * SR || m.w < c.w) { S.backClaim = { i: m.i, w: m.w, end: m.end }; dbg("retour à confirmer", m.i + ":" + m.w); return; }
+  }
+  S.backClaim = null;
   S.anchorAt = m.end;
   if (m.i === S.i) {
     reanchor(m.w, m.end, true, m.cf);
@@ -288,7 +301,8 @@ function asrPos(m) {
     const vb = S.samplesIn - bufLen();
     let cut = m.ga != null ? Math.round(m.ga - vb - 0.12 * SR) : -1;
     if (cut < SR * 0.8 || cut > bufLen()) { const dur = (ref.wt[m.w][1] - ref.wt[0][0]) * 160 * 1.15; cut = Math.round(m.end - dur - vb); }
-    if (cut < SR * 0.8) return;
+    // presque rien de ce verset-ci dans l'enregistrement en cours : on passe directement au suivant
+    if (cut < SR * 0.8) { jumpVerse(m.i, m.w, m.ga != null ? m.ga : m.end, m.ga != null); return; }
     endVerse(true, cut);
     postMessage({ t: "relock", i: S ? S.i : m.i, next: true, asr: true });
     if (S && S.i === m.i && S.tracker) reanchor(m.w, m.end, true, m.cf);
@@ -296,6 +310,12 @@ function asrPos(m) {
     // ailleurs dans la sourate (retour en arrière, verset sauté) : on repart de là
     jumpVerse(m.i, m.w, m.ga != null && m.w <= 1 ? m.ga : m.end, m.ga != null && m.w <= 1);
   }
+}
+// La reconnaissance dit « verset suivant » alors que le suivi croit qu'il a repris ce verset depuis le début : deux versets
+// peuvent commencer par les mêmes mots (67:2 et 67:3), ou il répète le verset. On attend le 3e mot pour trancher.
+function confirmOther(m) {
+  if (m.i !== S.i + 1 || !S.tracker) return true;
+  return m.w >= 2 || S.tracker.frac >= 0.85;
 }
 // relance le suivi du verset en cours : à l'échantillon endG, l'élève en était au mot w (part cf du mot)
 function reanchor(w, endG, quiet, cf) {
@@ -316,7 +336,7 @@ function jumpVerse(i, w, endG, atStart) {
   const ref = refs.get(S.keys[i]); if (!ref) return;
   const from = Math.max(S.ring.start, Math.round(endG - (atStart ? 0.15 : 0.3) * SR));
   const { a16 } = sliceChunks(S.ring.c, null, S.ring.start, from, S.samplesIn);
-  S.i = i; S.u16 = [new Float32Array(a16)]; S.native = []; S.located = true;
+  S.i = i; S.u16 = [new Float32Array(a16)]; S.native = []; S.located = true; S.verseAt = from;
   S.from = atStart ? 0 : Math.max(0, Math.max(ref.wt[w][0], ref.wt[w][1] - 30) - 5);
   startTracker(true);
   postMessage({ t: "goto", i, w, asr: true });
@@ -324,7 +344,7 @@ function jumpVerse(i, w, endG, atStart) {
 
 function locate() {
   const cands = [S.i, S.i + 1, S.i + 2, S.i + 3];
-  if (S.i > 0 && !S.reach.length) cands.unshift(S.i - 1); // revenir en arrière : seulement au tout début
+  if (S.i > 0) cands.unshift(S.i - 1); // il peut répéter le verset qu'il vient de finir
   const list = cands.filter(k => k >= 0 && k < S.keys.length);
   const res = E.locate(list.map(k => refs.get(S.keys[k]) || null), concat(S.u16));
   if (res.best < 0) return;
@@ -355,7 +375,7 @@ function autoRelock() {
     startTracker(true);
     if (S.tracker) S.tracker.jumpTo(best.end);
     postMessage({ t: "relock", i: S.i, next: true });
-  } else if (restarted(refs.get(S.keys[S.i]), best)) {
+  } else if (!S.asr && restarted(refs.get(S.keys[S.i]), best)) {
     // il a recommencé le verset depuis le début : on repart de là
     S.u16 = [x]; S.native = []; S.from = best.start;
     startTracker(true);
@@ -382,8 +402,9 @@ function confirmEnd() {
   if (r2 && (!r1 || r2.cost < r1.cost)) return true;
   if (!r1) return false;
   // il est encore dans ce verset : on attend, en le recalant là où il en est vraiment
-  if (restarted(cur, r1)) { S.u16 = [x]; S.native = []; S.from = r1.start; startTracker(true); if (S.tracker) S.tracker.jumpTo(r1.end); postMessage({ t: "relock", i: S.i, back: true }); }
-  else if (S.tracker && r1.end < S.tracker.posFrame - 10) { S.tracker.jumpTo(r1.end); S.lastPos = r1.end; }
+  // avec la reconnaissance vocale, c'est elle qui repère les reprises (le son seul confond une voyelle tenue avec un début de verset)
+  if (!S.asr && restarted(cur, r1)) { S.u16 = [x]; S.native = []; S.from = r1.start; startTracker(true); if (S.tracker) S.tracker.jumpTo(r1.end); postMessage({ t: "relock", i: S.i, back: true }); }
+  else if (!S.asr && S.tracker && r1.end < S.tracker.posFrame - 10) { S.tracker.jumpTo(r1.end); S.lastPos = r1.end; }
   return false;
 }
 
@@ -418,11 +439,13 @@ function endVerse(advance, cut) {
     const k = whichVerse(u16, i);
     if (k !== i) { postMessage({ t: "skipped", from: i, to: k }); S.i = i = k; ref = refs.get(S.keys[k]); }
   }
-  postMessage({ t: "verseEnd", i, native, rate: S.rate }, [native.buffer]);
+  // pour réécouter : le son à 16 kHz, exactement celui qui a été analysé (les repères tombent juste)
+  const play16 = u16.slice();
+  postMessage({ t: "verseEnd", i, native: play16, rate: SR }, [play16.buffer]);
   if (ref && u16.length > SR * 0.5) {
     try {
-      let x = u16;
-      if (!S.from) { const cut = E.lastStart(ref, u16); if (cut > 0) { x = u16.subarray(cut); postMessage({ t: "trimmed", i, s: cut / SR }); } }
+      let x = u16, uOff = 0;
+      if (!S.from) { const cut = E.lastStart(ref, u16); if (cut > 0) { x = u16.subarray(cut); uOff = cut / SR; } }
       let res = E.analyzeFull(ref, x, S.bias, S.from);
       if (!res.empty) {
         const raws = res.items.filter(x => x.raw > 0.15 && x.raw < 4);
@@ -430,6 +453,7 @@ function endVerse(advance, cut) {
         res = E.combine(res, others);
         const flagged = new Set(res.items.filter(x => x.kind === "court" || x.kind === "long").map(x => x.w));
         res.items = res.items.filter(x => !(x.kind === "diff" && flagged.has(x.w)));
+        res.uOff = uOff; // l'enregistrement complet commence avant (faux départ coupé) : décalage pour l'écoute
         postMessage({ t: "result", i, res });
         S.verses++;
         if (S.calib) for (const it of raws) S.ratios[E.groupOf(it.type)].push(it.raw);
@@ -437,6 +461,7 @@ function endVerse(advance, cut) {
     } catch (err) {}
   }
   S.u16 = carry16 ? [carry16] : []; S.native = carryNat ? [carryNat] : []; S.from = 0; S.pend = null;
+  S.verseAt = S.samplesIn - bufLen();
   if (!advance) return;
   S.i++;
   if (!S.calib) S.located = false; // au début de chaque verset : vérifier qu'il n'en a pas sauté

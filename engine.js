@@ -472,6 +472,19 @@ function analyzeFull(ref, usr, bias, from) {
       st = -1;
     }
   }
+  // pour l'écoute et l'affichage : le mot entier (chez le récitateur et chez l'élève), et la durée en temps (harakat)
+  const tabLen = 3 * H;
+  const EXP = { tabii: 2, lazim: 6, muttasil: 4, munfasil: 4, gen: 2, extra: 1 };
+  for (const it of items) {
+    const wt = ref.wt && ref.wt[it.w];
+    if (wt) { const [lo, hi] = mapR(Math.max(A0, wt[0]), wt[1]); if (hi >= 0) { it.refW = [wt[0], wt[1]]; it.usrW = [lo, hi]; } }
+    if (it.ratio == null || it.kind === "diff") continue;
+    const t = it.mi != null ? ref.targets[it.mi] : null;
+    let e = EXP[it.type];
+    if (e == null && t && t.rLen) { const c = 2 * t.rLen / tabLen; e = c < 3 ? 2 : c < 5 ? 4 : 6; }
+    if (e == null) e = 2;
+    it.exp = e; it.got = Math.max(0.5, Math.round(e * it.ratio * 2) / 2);
+  }
   items.sort((x, y) => (x.ref ? x.ref[0] : 1e9) - (y.ref ? y.ref[0] : 1e9));
   return { items, tempo: R };
 }
@@ -544,6 +557,7 @@ function relock(ref, x) {
 
 // ===== Suivi en direct d'un verset =====
 function LiveTracker(ref, onEvent, profile, bias, levels) {
+  const TU = Object.assign({ stay: 0.5, skip2: 0.03, skip3: 0.18, adv: 3 }, (typeof self !== "undefined" && self.__TUNE) || {});
   const F = ref.F, a0 = F.a0, a1 = F.a1, n = a1 - a0 + 1;
   let prev = new Float32Array(n).fill(Infinity), cur = new Float32Array(n).fill(Infinity);
   let buf = new Float32Array(0), off = 0, total = 0;
@@ -570,7 +584,7 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
     for (let d = 0; d < D; d++) { const sd = nAct > 20 ? Math.sqrt(m2[d] / nAct) + 1e-6 : 1; u[d] = (c[d] - mu[d]) / sd; }
     const lo = Math.max(0, pos - 60), hi = Math.min(n - 1, pos + 40);
     // la voix est là mais le suivi n'avance plus : on pousse doucement vers la suite
-    const stay = 0.3 + Math.max(0, stuck - 45) * 0.04;
+    const stay = TU.stay + Math.max(0, stuck - 45) * 0.04;
     cur.fill(Infinity);
     for (let i = lo; i <= hi; i++) {
       const d = cdist(F.cep[a0 + i], u);
@@ -579,13 +593,14 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
       else {
         best = prev[i] + stay;
         if (i > 0 && prev[i - 1] < best) best = prev[i - 1];
-        if (i > 1 && prev[i - 2] + 0.3 < best) best = prev[i - 2] + 0.3;
+        if (i > 1 && prev[i - 2] + TU.skip2 < best) best = prev[i - 2] + TU.skip2;
+        if (i > 2 && prev[i - 3] + TU.skip3 < best) best = prev[i - 3] + TU.skip3;
       }
       cur[i] = best + d;
     }
     let bi = pos, bv = Infinity;
     for (let i = lo; i <= hi; i++) if (cur[i] < bv) { bv = cur[i]; bi = i; }
-    if (bi > pos) { const np = Math.min(bi, pos + 2); for (let i = pos + 1; i <= np; i++) kAt[i] = fr.length - 1; pos = np; stuck = 0; }
+    if (bi > pos) { const np = Math.min(bi, pos + TU.adv); for (let i = pos + 1; i <= np; i++) kAt[i] = fr.length - 1; pos = np; stuck = 0; }
     else stuck++;
     const t = prev; prev = cur; cur = t;
     j++;

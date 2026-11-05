@@ -10,6 +10,8 @@ const SIZES = { [MODEL]: 69246033, [CORPUS]: 5453439 };
 const CACHE = "rihal-models-v1";
 const FRAME = 640;   // une trame du modèle = 40 ms = 640 échantillons à 16 kHz
 const LAT = 0;       // décalage trame -> instant réel (échantillons), mesuré sur des récitations alignées
+// Réglages du suivi : en mémorisation on répète souvent un verset ou un bout de verset, la reprise doit coûter peu.
+const CFG = Object.assign({ repeatCost: 2.5 }, self.__recoCfg || {});
 
 let sess = null, raw = null, loading = null, port = null;
 let q = [], qn = 0, busy = false, on = false;
@@ -51,7 +53,7 @@ async function load(ortUrl) {
   const ort = await ortP;
   if (!ortUrl && ort.env && ort.env.wasm) { ort.env.wasm.wasmPaths = ORT_CDN; ort.env.wasm.numThreads = 1; }
   const t0 = performance.now();
-  sess = await createZipformerSession({ ort, model: new Uint8Array(mb), corpus: raw, structural: false, enableFallback: false, debug: true, onEvent: m => { if (m.type === "debug") evs.push(m); } });
+  sess = await createZipformerSession({ ort, model: new Uint8Array(mb), corpus: raw, structural: false, enableFallback: false, debug: true, config: CFG, onEvent: m => { if (m.type === "debug") evs.push(m); } });
   // petit essai à vide : le premier calcul est toujours plus lent
   await sess.feed(new Float32Array(16000)); sess.reset();
   return { ms: Math.round(performance.now() - t0) };

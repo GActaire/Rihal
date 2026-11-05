@@ -15,6 +15,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Figtree:wght@400;500;600;700;800&display=swap">
 <style>
+/* police du mushaf, embarquée : marche hors connexion et affiche tous les signes du Coran */
+@font-face{font-family:"Rihal Quran";src:url(fonts/AmiriQuran.woff) format("woff");font-display:swap}
 /* Accueil : grille des sourates. Lecture : pages du mushaf, lumière qui suit la voix, dock en bas. */
 :root{
   --m-bg:#eef3f0; --m-surface:#ffffff; --m-page:#fdfdfb; --m-ink:#15241f; --m-muted:#5f726b; --m-line:#d9e3de;
@@ -25,7 +27,7 @@
   --m-diff:#b33a2e; --m-diff-soft:#f9dfdb;
   --m-dock:rgba(255,255,255,.88);
   --m-f-ui:"Figtree",system-ui,-apple-system,"Segoe UI",sans-serif;
-  --m-f-ar:"Amiri Quran","Amiri","Scheherazade New","Traditional Arabic",serif;
+  --m-f-ar:"Rihal Quran","Amiri Quran","Amiri","Scheherazade New","Traditional Arabic",serif;
   padding-top:env(safe-area-inset-top,0px);
 }
 @media (prefers-color-scheme: dark){:root{
@@ -97,10 +99,11 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .line.flow{text-align:center}
 .w{position:relative;cursor:pointer;border-radius:8px;padding:0 2px;transition:background-color .2s}
 .w .t{color:var(--m-ink)}
-.w.cv{background:var(--m-accent-soft)}
+.w.cv{background:color-mix(in srgb,var(--m-accent-soft) 55%,transparent)}
 .w.done .t{color:var(--m-accent)}
 .w.on .t{background-image:linear-gradient(to left,var(--m-accent) 0,var(--m-accent) var(--a,0%),var(--m-glow) var(--a,0%),var(--m-glow) var(--b,0%),var(--rest,var(--m-ink)) var(--b,0%));-webkit-background-clip:text;background-clip:text;color:transparent}
 .pages.masked .w.on{--rest:transparent}
+.pages.masked .w.on .t{background-image:linear-gradient(to left,var(--m-accent) 0,var(--m-accent) var(--a,0%),transparent var(--a,0%))}
 .w.on{background:var(--m-accent-soft);box-shadow:0 0 0 2px var(--m-accent-2)}
 .w.k-court{background:var(--m-short-soft);box-shadow:inset 0 -4px 0 var(--m-short)}
 .w.k-long{background:var(--m-long-soft);box-shadow:inset 0 -4px 0 var(--m-long)}
@@ -255,6 +258,79 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .auto-status{text-align:center;font-size:17px;font-weight:700}
 .suggest{display:block;max-width:600px;margin:0 auto 8px;width:100%;border:0;border-radius:12px;padding:10px 14px;background:var(--m-accent);color:#fff;font:700 14px var(--m-f-ui);cursor:pointer}
 @media (max-width:480px){.grid{grid-template-columns:1fr}.bar-row{grid-template-columns:64px 1fr 56px}}
+
+/* sens des versets */
+.bar-r{display:flex;align-items:center;gap:8px}
+.mean-btn{display:flex;align-items:center;gap:6px;border:1px solid var(--m-line);background:var(--m-surface);color:var(--m-ink);border-radius:12px;height:40px;padding:0 12px;font:700 14px var(--m-f-ui);cursor:pointer}
+.mean-btn svg{width:20px;height:20px;color:var(--m-accent)}
+.meaning{display:flex;flex-direction:column;gap:8px;max-height:52vh;overflow:auto;padding-right:2px}
+.mv{background:var(--m-surface);border:1px solid var(--m-line);border-radius:14px;padding:6px 14px}
+.mv summary{display:flex;gap:10px;align-items:flex-start;cursor:pointer;list-style:none;padding:8px 0}
+.mv summary::-webkit-details-marker{display:none}
+.mv-n{flex:none;width:26px;height:26px;border-radius:999px;display:grid;place-items:center;background:var(--m-accent-soft);color:var(--m-accent);font-weight:800;font-size:13px}
+.mv-fr{font-size:15.5px;line-height:1.55}
+.mv-ar{font-family:var(--m-f-ar);direction:rtl;font-size:clamp(22px,3.8vw,28px);line-height:2;margin:4px 0 6px;text-align:right}
+.mv-note{font-size:13px;color:var(--m-muted);white-space:pre-line;border-top:1px solid var(--m-line);padding-top:8px;margin-top:8px}
+.wbw{display:flex;flex-wrap:wrap;direction:rtl;gap:6px;padding-bottom:10px}
+.wbw-w{display:flex;flex-direction:column;align-items:center;gap:2px;background:var(--m-bg);border-radius:10px;padding:4px 8px;min-width:54px}
+.wbw-ar{font-family:var(--m-f-ar);font-size:22px;line-height:1.7}
+.wbw-tr{direction:ltr;font-size:12px;color:var(--m-muted);text-align:center;max-width:120px;line-height:1.3}
+.credit{font-size:11.5px;color:var(--m-muted);text-align:center}
+.mem{margin-left:8px;font-size:12px;font-weight:800;border-radius:999px;padding:2px 8px}
+.mem.hi{background:var(--m-ok-soft);color:var(--m-ok)} .mem.mid{background:var(--m-short-soft);color:var(--m-short)} .mem.lo{background:var(--m-diff-soft);color:var(--m-diff)}
+.ve.weak{box-shadow:0 0 0 3px var(--m-short-soft);border-color:var(--m-short)}
+@media (max-width:480px){.mean-btn span{display:none}.mean-btn{padding:0 9px}}
+
+/* corrections v9 */
+.w.on .t{padding:.4em 0}
+.score-top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.ring{--p:0;flex:none;width:58px;height:58px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--m-ok) calc(var(--p)*1%),var(--m-line) 0)}
+.ring b{width:46px;height:46px;border-radius:50%;background:var(--m-surface);display:grid;place-items:center;font-size:13px;font-weight:800;font-variant-numeric:tabular-nums}
+.vp{font-family:var(--m-f-ar);direction:rtl;text-align:center;font-size:clamp(24px,4.2vw,32px);line-height:2.2;background:var(--m-page);border:1px solid var(--m-line);border-radius:16px;padding:10px 14px}
+.vp-w{position:relative;border-radius:8px;padding:0 3px;white-space:nowrap}
+.vp-w.ok{color:var(--m-ok)}
+.vp-w.k-court{background:var(--m-short-soft);box-shadow:inset 0 -4px 0 var(--m-short);cursor:pointer}
+.vp-w.k-long{background:var(--m-long-soft);box-shadow:inset 0 -4px 0 var(--m-long);cursor:pointer}
+.vp-w.k-diff{background:var(--m-diff-soft);box-shadow:inset 0 -4px 0 var(--m-diff);cursor:pointer}
+.vp-w sup{position:absolute;top:0;left:-6px;font:800 11px/1 var(--m-f-ui);color:#fff;background:var(--m-ink);border-radius:999px;min-width:18px;height:18px;display:grid;place-items:center;padding:0 4px;direction:ltr}
+.vp-w.k-court sup{background:var(--m-short)} .vp-w.k-long sup{background:var(--m-long)} .vp-w.k-diff sup{background:var(--m-diff)}
+.vp-end{display:inline-grid;place-items:center;min-width:1.4em;height:1.4em;line-height:1;border-radius:999px;border:1.5px solid var(--m-muted);font-size:.6em;color:var(--m-muted);vertical-align:.2em}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;justify-content:center;font-size:12.5px;color:var(--m-muted);font-weight:600}
+.lg{display:inline-flex;align-items:center;gap:6px}
+.lg i{width:12px;height:12px;border-radius:4px}
+.lg-ok{background:var(--m-ok)} .lg-court{background:var(--m-short)} .lg-long{background:var(--m-long)} .lg-diff{background:var(--m-diff)}
+.card .say{font-size:16px;font-weight:600;margin:0}
+.card .why{font-size:13px;color:var(--m-muted);margin:0}
+.card.flash{box-shadow:0 0 0 3px var(--m-accent-2)}
+.card .acts .btn{flex:1 1 auto}
+.beats{display:flex;flex-direction:column;gap:6px;background:var(--m-bg);border-radius:12px;padding:10px 12px}
+.beat-row{display:grid;grid-template-columns:86px 1fr auto;align-items:center;gap:10px;font-size:13px}
+.beat-lab{font-weight:700;color:var(--m-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.beat-n{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.dots{display:flex;gap:6px;flex-wrap:wrap}
+.dots i{width:16px;height:16px;border-radius:50%;border:2px solid var(--m-line);background:transparent}
+.dots.ref i.on{background:var(--m-accent);border-color:var(--m-accent)}
+.dots.usr i.on{background:var(--m-ink);border-color:var(--m-ink)}
+.k-court .dots.usr i.on{background:var(--m-short);border-color:var(--m-short)} .k-long .dots.usr i.on{background:var(--m-long);border-color:var(--m-long)} .k-ok .dots.usr i.on{background:var(--m-ok);border-color:var(--m-ok)}
+.dots i.half{background:linear-gradient(to left,transparent 50%,var(--m-ink) 50%)}
+.k-court .dots.usr i.half{background:linear-gradient(to left,transparent 50%,var(--m-short) 50%);border-color:var(--m-short)}
+.k-long .dots.usr i.half{background:linear-gradient(to left,transparent 50%,var(--m-long) 50%);border-color:var(--m-long)}
+.k-ok .dots.usr i.half{background:linear-gradient(to left,transparent 50%,var(--m-ok) 50%);border-color:var(--m-ok)}
+.oklist{background:var(--m-surface);border:1px solid var(--m-line);border-radius:14px;padding:4px 12px}
+.oklist summary{font-weight:700;cursor:pointer;padding:10px 2px}
+.oklist[open]{display:flex;flex-direction:column;gap:10px;padding-bottom:12px}
+.sticky-acts{position:sticky;bottom:-22px;background:var(--m-bg);padding:10px 0 4px;margin-top:4px}
+.rules{display:flex;flex-direction:column;gap:8px;background:var(--m-surface);border:1px solid var(--m-line);border-radius:14px;padding:12px 14px}
+.rule-row{display:grid;grid-template-columns:minmax(120px,190px) 1fr 44px;gap:10px;align-items:center;font-size:13.5px}
+.rr-lab{font-weight:700}
+.rr-bar{display:flex;height:12px;border-radius:999px;overflow:hidden;background:var(--m-bg);gap:2px}
+.rr-ok{background:var(--m-ok)} .rr-court{background:var(--m-short)} .rr-long{background:var(--m-long)}
+.rr-n{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:var(--m-muted)}
+.vr-l{display:flex;flex-direction:column;gap:4px;min-width:0}
+.vr-dots{display:flex;gap:3px;flex-wrap:wrap}
+.vr-dots i{width:9px;height:9px;border-radius:50%}
+.d-ok{background:var(--m-ok)} .d-court{background:var(--m-short)} .d-long{background:var(--m-long)} .d-diff{background:var(--m-diff)}
+@media (max-width:480px){.rule-row{grid-template-columns:1fr 60px 40px}.beat-row{grid-template-columns:64px 1fr auto}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -282,7 +358,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     <button id="resume" class="resume" hidden></button>
     <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10.5 4a6.5 6.5 0 0 1 5.2 10.4l4.4 4.4-1.4 1.4-4.4-4.4A6.5 6.5 0 1 1 10.5 4Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z"/></svg><input id="q" type="search" placeholder="Chercher une sourate : nom, numéro…" autocomplete="off"></label>
     <div id="grid" class="grid"><p class="empty">Chargement des sourates…</p></div>
-    <p class="foot">Texte du Coran et minutage d'al-Husary : quran.com. Audios : everyayah.com.</p>
+    <p class="foot">Texte du Coran, minutage et mot à mot : quran.com. Audios : everyayah.com. Traduction du sens : Rachid Maach (QuranEnc.com). Police : Amiri Quran (licence OFL).</p>
   </section>
 
   <section id="hifz" class="view" hidden></section>
@@ -291,7 +367,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     <header class="bar">
       <button id="back" class="icon-btn" aria-label="Toutes les sourates"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg></button>
       <div class="bar-title"><span id="sName"></span><span id="sAr" class="ar-name"></span></div>
-      <span id="sProg" class="bar-prog"></span>
+      <span class="bar-r"><button id="meanBtn" class="mean-btn" aria-label="Sens du verset"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5a.5.5 0 0 0 0 1H20v2H6.5A2.5 2.5 0 0 1 4 18.5v-13ZM9 7v2h7V7H9Zm0 4v2h5v-2H9Z"/></svg><span>Sens</span></button><span id="sProg" class="bar-prog"></span></span>
     </header>
     <div id="calibBanner" class="calib-banner" hidden><b>Étalonnage en 2 étapes.</b> 1. Reste silencieux 3 secondes : l'application mesure le bruit autour de toi. 2. Récite Al-Fatiha puis Al-Kawthar, calmement, comme tu penses qu'elles doivent être récitées : elle apprend ton timbre, ton rythme et ta façon de tenir chaque type de madd. À la fin, tu reçois un rapport complet.</div>
     <div id="hifzBar" class="hifz-bar" hidden></div>
@@ -317,7 +393,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     </div>
   </div>
 </div>
-<script src="search.js?v=8"></script>
-<script src="app.js?v=8"></script>
+<script src="search.js?v=9"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
