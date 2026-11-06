@@ -101,6 +101,7 @@ self.onmessage = e => {
       if (P) P.postMessage({ t: "begin" });
       break;
     case "start": {
+      if (m.tune) self.__TUNE = m.tune; // réglages d'essai (tests automatiques)
       const sc = m.fromScan && SC ? SC : null;
       SC = null;
       S = {
@@ -280,6 +281,9 @@ function asrPos(m) {
     // d'accord : même mot, ou le suivi a un mot d'avance (il entend en direct, la reconnaissance a du retard)
     if (a != null && b != null ? a - b >= 0 && a - b <= 1 : h[1] === m.i && h[2] - m.w >= 0 && h[2] - m.w <= 1) return;
     dbg("écart", (m.end / SR).toFixed(2), "suivi", h[1] + ":" + h[2], "reco", m.i + ":" + m.w, "verset en cours", S.i);
+    // la reconnaissance vient tout juste d'entrer dans le mot suivant : souvent une lettre commune aux deux mots
+    // (fin de l'un, début de l'autre). On attend qu'elle soit vraiment dedans avant de valider le mot en cours.
+    if (h[1] === m.i && m.i === S.i && m.w === h[2] + 1 && (m.cf == null || m.cf < 0.35)) { dbg("attente (frontière de mot)"); return; }
     if (m.i < S.i && h[1] === m.i) return; // résultat arrivé trop tard : le suivi est déjà plus loin
   }
   // fin du verset précédent entendue juste avant qu'on passe au suivant : résultat en retard, pas une reprise
@@ -288,7 +292,9 @@ function asrPos(m) {
   // retour en arrière (il répète un verset ou reprend plus haut) : on attend une 2e confirmation de la reconnaissance,
   // pour ne pas faire reculer la lumière sur une simple hésitation
   const backward = m.i < S.i || (m.i === S.i && h && h[1] === S.i && m.w < h[2] - 1);
-  if (backward) {
+  // cas typique : il vient de finir un verset et le répète aussitôt → on y retourne sans attendre
+  const quickRepeat = m.i === S.i - 1 && m.w <= 3 && S.verseAt != null && m.end - S.verseAt < 5 * SR && m.end > S.verseAt + 0.4 * SR;
+  if (backward && !quickRepeat) {
     const c = S.backClaim;
     if (!c || c.i !== m.i || m.end - c.end > 1.6 * SR || m.w < c.w) { S.backClaim = { i: m.i, w: m.w, end: m.end }; dbg("retour à confirmer", m.i + ":" + m.w); return; }
   }
@@ -308,7 +314,9 @@ function asrPos(m) {
     if (S && S.i === m.i && S.tracker) reanchor(m.w, m.end, true, m.cf);
   } else {
     // ailleurs dans la sourate (retour en arrière, verset sauté) : on repart de là
-    jumpVerse(m.i, m.w, m.ga != null && m.w <= 1 ? m.ga : m.end, m.ga != null && m.w <= 1);
+    // début du verset entendu (reprise du verset, ou verset sauté repéré tôt) : on prend tout depuis ce début
+    const fromStart = m.ga != null && m.w <= 3 && m.end - m.ga < 6 * SR;
+    jumpVerse(m.i, m.w, fromStart ? m.ga : m.end, fromStart);
   }
 }
 // La reconnaissance dit « verset suivant » alors que le suivi croit qu'il a repris ce verset depuis le début : deux versets
@@ -336,10 +344,11 @@ function jumpVerse(i, w, endG, atStart) {
   const ref = refs.get(S.keys[i]); if (!ref) return;
   const from = Math.max(S.ring.start, Math.round(endG - (atStart ? 0.15 : 0.3) * SR));
   const { a16 } = sliceChunks(S.ring.c, null, S.ring.start, from, S.samplesIn);
+  const was = S.i;
   S.i = i; S.u16 = [new Float32Array(a16)]; S.native = []; S.located = true; S.verseAt = from;
   S.from = atStart ? 0 : Math.max(0, Math.max(ref.wt[w][0], ref.wt[w][1] - 30) - 5);
   startTracker(true);
-  postMessage({ t: "goto", i, w, asr: true });
+  postMessage({ t: "goto", i, w, asr: true, rep: i < was });
 }
 
 function locate() {

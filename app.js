@@ -512,7 +512,7 @@ function startSession(cap, o) {
   prepAround(o.i);
   const others = st.multi && !calibMode ? RECITERS.filter(r => r.id !== st.rec && r.id !== 12).map(r => r.id) : [];
   const lim = H ? H.to + 1 : S.v.length;
-  const msg = { t: "start", wc: S.v.slice(0, lim).map(V => V.w.length), keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: o.i, rate: cap.rate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode && !o.fromScan && !asrReady(), asr: asrReady() && !calibMode, dbg: !!window.__RIHAL_ORT_URL };
+  const msg = { t: "start", wc: S.v.slice(0, lim).map(V => V.w.length), keys: S.v.slice(0, lim).map((_, i) => keyOf(i, st.rec)), extra: S.v.slice(0, lim).map((_, i) => others.map(r => keyOf(i, r))), i: o.i, rate: cap.rate, profile: voice && voice.profile, bias: voice && voice.bias, calib: calibMode, locate: !calibMode && !o.fromScan && !asrReady(), asr: asrReady() && !calibMode, dbg: !!window.__RIHAL_ORT_URL, tune: window.__RIHAL_TUNE || null };
   if (o.fromScan) msg.fromScan = o.fromScan;
   if (msg.asr) recoHint(S.id, o.i);
   sendToWorker(cap, msg);
@@ -640,6 +640,7 @@ worker.onmessage = e => {
   switch (m.t) {
     case "verse": {
       if (!rec) return;
+      if (results[m.i] && !calibMode) clearVerseMarks(m.i); // il récite à nouveau ce verset : on repart de zéro
       rec.vi = m.i;
       selectVerse(m.i, true);
       veEls.forEach(v => v && v.classList.remove("st-run"));
@@ -661,7 +662,7 @@ worker.onmessage = e => {
     case "goto":
       clearLight();
       if (rec) rec.vi = m.i;
-      if (m.asr) { selectVerse(m.i, true); setStatus(`Tu récites le verset ${S.v[m.i].n} : je te suis.`, "ok"); }
+      if (m.asr) { selectVerse(m.i, true); setStatus(m.rep ? `Tu répètes le verset ${S.v[m.i].n} : je te suis.` : `Tu récites le verset ${S.v[m.i].n} : je te suis.`, "ok"); }
       else setStatus(m.w ? `Reprise au mot touché, verset ${S.v[m.i].n}.` : `On reprend le verset ${S.v[m.i].n} depuis le début.`, "ok");
       break;
     case "skipped":
@@ -734,8 +735,14 @@ const disp = t => (t || "").replace(/ٞ/g, "ࣱ");
 const wordText = (vi, w) => (S && S.v[vi] && S.v[vi].w[w]) ? disp(S.v[vi].w[w][0]) : "";
 // erreur repérée pendant la récitation : marquée tout de suite sur le mot (provisoire, confirmée à la fin du verset)
 const live = {};
+function clearVerseMarks(vi) {
+  results[vi] = null; delete live[vi];
+  (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff", "live"); const s = w.querySelector("sup"); if (s) s.remove(); });
+  if (veEls[vi]) veEls[vi].classList.remove("st-ok", "st-warn");
+}
 function liveMark(m) {
-  const w = wordEls[m.i] && wordEls[m.i][m.w]; if (!w || results[m.i]) return;
+  if (results[m.i]) clearVerseMarks(m.i);
+  const w = wordEls[m.i] && wordEls[m.i][m.w]; if (!w) return;
   (live[m.i] = live[m.i] || []).push({ w: m.w, kind: m.kind, type: m.type, syl: m.syl, ratio: m.ratio, refS: m.refS, usrS: m.usrS });
   w.classList.remove("k-court", "k-long"); w.classList.add("k-" + m.kind, "live");
 }
@@ -859,11 +866,21 @@ function letterChart(vi, it, res) {
   const mk = (tag, at, txt) => { const e = document.createElementNS(NS, tag); for (const k in at) e.setAttribute(k, at[k]); if (txt != null) e.textContent = txt; svg.appendChild(e); return e; };
   rows.forEach((r, ri) => {
     const y = top + ri * (RH + GAP), B = r.B, tot = Math.max(1, B[B.length - 1] - B[0]);
-    const X = f => W - (f - B[0]) / tot * W; // de droite à gauche, comme l'arabe
+    // positions à l'écran : chaque lettre garde au moins une petite largeur (l'alignement peut en écraser une)
+    const L = B.length - 1, minW = Math.min(0.04, 0.5 / L);
+    const raw = []; for (let k = 0; k < L; k++) raw.push(Math.max(0, B[k + 1] - B[k]) / tot);
+    const extra = raw.reduce((q, v) => q + Math.max(0, minW - v), 0), big = raw.reduce((q, v) => q + (v > minW ? v - minW : 0), 0);
+    const wd = raw.map(v => v <= minW ? minW : minW + (v - minW) * Math.max(0, 1 - extra / Math.max(1e-6, big)));
+    const P = [0]; wd.forEach(v => P.push(P[P.length - 1] + v));
+    const X = f => { // f : borne d'origine -> position (de droite à gauche, comme l'arabe)
+      let k = 0; while (k < L - 1 && f > B[k + 1]) k++;
+      const a = B[k], b = B[k + 1], u = b > a ? Math.max(0, Math.min(1, (f - a) / (b - a))) : 0;
+      return W - (P[k] + u * wd[k]) / P[L] * W;
+    };
     const t0 = fsec(B[0]) + r.off, t1 = fsec(B[B.length - 1]) + r.off;
     // lettres
     for (let k = 0; k < B.length - 1; k++) {
-      const x1 = X(B[k]), x0 = X(B[k + 1]), w = Math.max(0, x1 - x0);
+      const x1 = W - P[k] / P[L] * W, x0 = W - P[k + 1] / P[L] * W, w = Math.max(0, x1 - x0);
       const isM = k === r.li;
       mk("rect", { x: x0 + 1, y, width: Math.max(0, w - 2), height: RH, rx: 8, class: "lc-box" + (isM ? (r.ref ? " lc-ref" : " lc-usr lc-" + it.kind) : "") });
       if (w > 34 && it.lets[k]) mk("text", { x: x0 + w / 2, y: y + RH * 0.42, class: "lc-let" + (isM ? " lc-on" : ""), "text-anchor": "middle", "dominant-baseline": "central" }, disp(it.lets[k]));
@@ -871,7 +888,7 @@ function letterChart(vi, it, res) {
     }
     // la voix (enveloppe)
     const env = envelope(r.buf, t0, t1, 160);
-    let d = ""; env.forEach((v, k) => { const x = W - (k + 0.5) / env.length * W, yy = y + RH - 4 - v * (RH * 0.5); d += (k ? "L" : "M") + x.toFixed(1) + " " + yy.toFixed(1); });
+    let d = ""; env.forEach((v, k) => { const f = B[0] + (k + 0.5) / env.length * tot, x = X(f), yy = y + RH - 4 - v * (RH * 0.5); d += (k ? "L" : "M") + x.toFixed(1) + " " + yy.toFixed(1); });
     mk("path", { d, class: "lc-env" });
     mk("text", { x: 8, y: y + 18, class: "lc-who" }, r.who);
     // toucher une ligne : écouter ce mot chez cette personne
@@ -881,6 +898,15 @@ function letterChart(vi, it, res) {
   const box = el("div", "lchart-box");
   box.appendChild(el("div", "lc-h", "Lettre par lettre"));
   box.appendChild(svg);
+  // en une phrase : la part du mot occupée par la voyelle longue, chez lui et chez toi
+  const share = r => { const B = r.B, k = r.li; if (k == null || k < 0 || k >= B.length - 1) return null; const t = B[B.length - 1] - B[0]; return t > 0 ? Math.round((B[k + 1] - B[k]) / t * 100) : null; };
+  const rr = rows.find(r => r.ref), ru = rows.find(r => !r.ref);
+  const a = rr && share(rr), b = ru && share(ru);
+  if (a != null && b != null && it.lets[it.li]) {
+    const lt = el("p", "lc-sum"); const bd = el("bdi", "lc-ar", disp(it.lets[it.li])); bd.dir = "rtl";
+    lt.append("La voyelle longue ", bd, ` prend ${a} % du mot chez ${rr.who}, et ${b} % chez toi.`);
+    box.appendChild(lt);
+  }
   box.appendChild(el("p", "lc-note", "Chaque case est une lettre, sa largeur est le temps qu'elle dure dans le mot (de droite à gauche). La case colorée est la voyelle longue. Touche une ligne pour l'écouter."));
   return box;
 }

@@ -182,6 +182,23 @@ function dtwSub(A, B) {
   return path.reverse();
 }
 
+// Reprise d'un verset : le début de la nouvelle voix ressemble-t-il au début du verset que l'élève vient de réciter ?
+// On compare sa voix à SA PROPRE voix (même personne, même micro) : bien plus fiable qu'avec un récitateur.
+// Renvoie { cost: écart avec le début, base: écart avec le reste du verset, start: où ça commence (trames) }.
+function selfRepeat(prevX, newX, secs) {
+  const P = features(prevX), Q = features(newX);
+  const N = Math.min(Math.round((secs || 1) * 100), Q.a1 - Q.a0 - 5);
+  if (N < 50 || P.a1 - P.a0 < N + 40) return null;
+  const A = Q.cep.slice(Q.a0 + 3, Q.a0 + 3 + N);
+  const mean = p => p.reduce((q, v) => q + v[2], 0) / p.length;
+  const B = P.cep.slice(P.a0, Math.min(P.a1, P.a0 + Math.round(N * 2.2)) + 1);
+  const p1 = dtwSub(A, B);
+  const off = P.a0 + Math.round(N * 0.9);
+  if (P.a1 - off < N * 0.8) return { cost: mean(p1), start: p1[0][1], base: null };
+  const p2 = dtwSub(A, P.cep.slice(off, P.a1 + 1));
+  return { cost: mean(p1), start: p1[0][1], base: mean(p2) };
+}
+
 // DTW sur [a0..a1] x [b0..b1], sous-échantillonné pour les longs versets.
 function dtw(A, B, a0, a1, b0, b1) {
   const n = a1 - a0 + 1, m = b1 - b0 + 1;
@@ -455,7 +472,9 @@ function analyzeFull(ref, usr, bias, from) {
     const [lo, hi] = mapU(s, e); if (hi < 0) continue;
     const r = runIn(ref.soft, lo - 6, hi + 6, 6);
     const ratio = len / Math.max(1, r.len * R) / biasOf(bias, "tabii");
-    if (ratio > 2.2) items.push({ w: wordAt(ref, (lo + hi) / 2).w, type: "extra", ref: r.seg || [lo, hi], usr: [s, e], refS: sec(r.len * R), usrS: sec(len), ratio, kind: "long" });
+    const xw = wordAt(ref, (lo + hi) / 2).w;
+    // dernier mot du verset : à l'arrêt (waqf), la fin peut s'allonger (tanwin -an lu « ā », madd de fin de verset)
+    if (ratio > 2.2 && xw < (ref.nWords || ref.wt.length) - 1) items.push({ w: xw, type: "extra", ref: r.seg || [lo, hi], usr: [s, e], refS: sec(r.len * R), usrS: sec(len), ratio, kind: "long" });
   }
   // passages très différents (mot oublié ou changé ?)
   const dl = path.map(p => p[2]);
@@ -493,7 +512,16 @@ function analyzeFull(ref, usr, bias, from) {
     const U = B.map(b => nearU(Math.round(b)));
     if (U.some(v => v < 0)) continue;
     for (let k = 1; k < U.length; k++) U[k] = Math.max(U[k], U[k - 1]);
-    it.refL = B.map(v => Math.round(v)); it.usrL = U;
+    // la voyelle longue de l'élève est calée sur sa durée mesurée (celle qui donne le verdict) ; les autres lettres
+    // gardent leurs proportions de part et d'autre
+    const t0 = it.mi != null ? ref.targets[it.mi] : null, L = U.length - 1;
+    if (t0 && t0.li != null && t0.li < L && it.usr && it.kind !== "diff") {
+      const li = t0.li, s0 = it.usr[0], e0 = it.usr[1];
+      const a = Math.min(U[0], s0), z = Math.max(U[L], e0);
+      const fit = (k0, k1, lo, hi) => { const o0 = U[k0], o1 = U[k1], span = Math.max(1e-6, o1 - o0); for (let k = k0; k <= k1; k++) U[k] = lo + (U[k] - o0) / span * (hi - lo); };
+      fit(0, li, a, s0); fit(li + 1, L, e0, z); U[li] = s0; U[li + 1] = e0;
+    }
+    it.refL = B.map(v => Math.round(v)); it.usrL = U.map(v => Math.round(v));
     it.lets = letters(word.replace(/\u0622/g, "\u0627\u0653")).map(x => x.c + x.m);
     const t = it.mi != null ? ref.targets[it.mi] : null;
     if (t && t.li != null) it.li = t.li;
@@ -751,5 +779,5 @@ function locate(refs, x) {
   return { best, costs };
 }
 
-(typeof self !== "undefined" ? self : window).MiroirEngine = { SR, HOP, features, detectMadds, prepareRef, analyzeFull, combine, relock, lastStart, LiveTracker, wordAt, letterAt, letterWeights, voiceStats, locate, groupOf, percentile };
+(typeof self !== "undefined" ? self : window).MiroirEngine = { SR, HOP, features, detectMadds, prepareRef, analyzeFull, combine, relock, lastStart, LiveTracker, wordAt, letterAt, letterWeights, voiceStats, locate, groupOf, percentile, selfRepeat };
 })();
