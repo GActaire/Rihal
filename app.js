@@ -25,7 +25,7 @@ const saveSettings = p => store.set("settings", { ...settings(), ...p });
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null, pendingStart = false;
-const worker = new Worker("worker.js?v=9");
+const worker = new Worker("worker.js?v=10");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -260,7 +260,7 @@ async function openSurah(id, calib) {
   const parts = [];
   for (const sid of sur) { const t = await loadText(sid); if (!t) { $("pages").textContent = ""; $("pages").appendChild(el("p", "empty", "Impossible de charger le texte. Vérifie ta connexion internet.")); return; } parts.push(t); }
   S = { id: calibMode ? 0 : id, sur, c, v: parts.flatMap(t => t.v.map(V => ({ ...V }))), recs: {}, gl: parts[0].gl || "" };
-  results = new Array(S.v.length).fill(null); usrBufs = [];
+  results = new Array(S.v.length).fill(null); usrBufs = []; for (const k in live) delete live[k];
   H = !calibMode && pendingH && pendingH.s === id ? pendingH : null; pendingH = null;
   if (H) { H.to = Math.min(H.to, S.v.length - 1); H.t0 = Date.now(); }
   const last = store.get("last", null);
@@ -679,11 +679,12 @@ worker.onmessage = e => {
       if (rec && m.i === rec.vi && m.w >= 0) { if (m.back) rewind(m.i, m.w); setTarget(m.i, m.w, m.f, m.l, m.lf); }
       break;
     case "madd": {
-      if (!rec || m.i !== rec.vi) return;
+      if (!rec || calibMode || (m.kind !== "court" && m.kind !== "long")) return;
+      liveMark(m);
       const strong = (m.kind === "court" && m.ratio < 0.45) || (m.kind === "long" && m.ratio > 2.2);
-      if (!strong || calibMode) return;
+      if (!strong || m.i !== rec.vi) return;
       const it = { type: m.type, kind: m.kind };
-      setStatus(`${m.kind === "court" ? "Trop court" : "Trop long"} : ${wordText(m.i, m.w)}. ${advice(it)}`, m.kind);
+      setStatus(`${m.kind === "court" ? "Trop court" : "Trop long"} : ${wordText(m.i, m.w)}. ${advice(it)} Touche le mot pour voir.`, m.kind);
       break;
     }
     case "jump":
@@ -731,9 +732,17 @@ const isBad = i => i.kind === "court" || i.kind === "long" || i.kind === "diff";
 // le texte de quran.com écrit le tanwin « ouvert » avec un signe que la police du mushaf ne dessine pas : on prend son équivalent
 const disp = t => (t || "").replace(/ٞ/g, "ࣱ");
 const wordText = (vi, w) => (S && S.v[vi] && S.v[vi].w[w]) ? disp(S.v[vi].w[w][0]) : "";
+// erreur repérée pendant la récitation : marquée tout de suite sur le mot (provisoire, confirmée à la fin du verset)
+const live = {};
+function liveMark(m) {
+  const w = wordEls[m.i] && wordEls[m.i][m.w]; if (!w || results[m.i]) return;
+  (live[m.i] = live[m.i] || []).push({ w: m.w, kind: m.kind, type: m.type, syl: m.syl, ratio: m.ratio, refS: m.refS, usrS: m.usrS });
+  w.classList.remove("k-court", "k-long"); w.classList.add("k-" + m.kind, "live");
+}
 function markVerse(vi) {
   const res = results[vi]; if (!res) return;
-  (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff"); const s = w.querySelector("sup"); if (s) s.remove(); });
+  delete live[vi];
+  (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff", "live"); const s = w.querySelector("sup"); if (s) s.remove(); });
   let n = 0;
   res.items.filter(isBad).forEach(it => {
     n++;
@@ -817,6 +826,80 @@ function beats(it, res) {
   return b;
 }
 
+// enveloppe du son (pour dessiner où la voix est tenue)
+function envelope(buf, t0, t1, n) {
+  const out = new Float32Array(n); if (!buf) return out;
+  const d = buf.getChannelData(0), sr = buf.sampleRate;
+  const a = Math.max(0, Math.floor(t0 * sr)), b = Math.min(d.length, Math.floor(t1 * sr));
+  if (b - a < n) return out;
+  const step = (b - a) / n; let mx = 1e-6;
+  for (let k = 0; k < n; k++) { let s2 = 0, c = 0; const s = Math.floor(a + k * step), e = Math.floor(a + (k + 1) * step); for (let q = s; q < e; q += 2) { s2 += d[q] * d[q]; c++; } out[k] = Math.sqrt(s2 / Math.max(1, c)); mx = Math.max(mx, out[k]); }
+  for (let k = 0; k < n; k++) out[k] = Math.pow(out[k] / mx, 0.6);
+  return out;
+}
+const recIdOf = key => +String(key).split("|")[0];
+// les lignes du schéma : chaque récitateur, puis toi (même mot, chacun à sa propre vitesse)
+function letterRows(vi, it, res) {
+  const rows = [];
+  if (it.refL && res.refBuf) rows.push({ who: res.recName || "Récitateur", B: it.refL, off: 0, buf: res.refBuf, li: it.li, ref: true });
+  for (const a of it.alts || []) {
+    const buf = bufs.get(a.key); if (!buf || !a.refL) continue;
+    rows.push({ who: recInfo(recIdOf(a.key)).short, B: a.refL, off: 0, buf, li: a.li != null ? a.li : it.li, ref: true });
+  }
+  if (it.usrL && res.usrBuf) rows.push({ who: "Toi", B: it.usrL, off: res.uOff || 0, buf: res.usrBuf, li: it.li, ref: false });
+  return rows;
+}
+function letterChart(vi, it, res) {
+  const rows = letterRows(vi, it, res);
+  if (!it.lets || rows.length < 2 || !rows.some(r => !r.ref)) return null;
+  const NS = "http://www.w3.org/2000/svg", W = 1000, RH = 74, GAP = 16, top = 6;
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${rows.length * (RH + GAP) + top}`); svg.setAttribute("class", "lchart"); svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Durée de chaque lettre du mot, chez les récitateurs et chez toi");
+  const mk = (tag, at, txt) => { const e = document.createElementNS(NS, tag); for (const k in at) e.setAttribute(k, at[k]); if (txt != null) e.textContent = txt; svg.appendChild(e); return e; };
+  rows.forEach((r, ri) => {
+    const y = top + ri * (RH + GAP), B = r.B, tot = Math.max(1, B[B.length - 1] - B[0]);
+    const X = f => W - (f - B[0]) / tot * W; // de droite à gauche, comme l'arabe
+    const t0 = fsec(B[0]) + r.off, t1 = fsec(B[B.length - 1]) + r.off;
+    // lettres
+    for (let k = 0; k < B.length - 1; k++) {
+      const x1 = X(B[k]), x0 = X(B[k + 1]), w = Math.max(0, x1 - x0);
+      const isM = k === r.li;
+      mk("rect", { x: x0 + 1, y, width: Math.max(0, w - 2), height: RH, rx: 8, class: "lc-box" + (isM ? (r.ref ? " lc-ref" : " lc-usr lc-" + it.kind) : "") });
+      if (w > 34 && it.lets[k]) mk("text", { x: x0 + w / 2, y: y + RH * 0.42, class: "lc-let" + (isM ? " lc-on" : ""), "text-anchor": "middle", "dominant-baseline": "central" }, disp(it.lets[k]));
+      if (isM && w > 60) mk("text", { x: x0 + w / 2, y: y + RH - 12, class: "lc-dur", "text-anchor": "middle" }, (Math.round((fsec(B[k + 1]) - fsec(B[k])) * 10) / 10).toFixed(1).replace(".", ",") + " s");
+    }
+    // la voix (enveloppe)
+    const env = envelope(r.buf, t0, t1, 160);
+    let d = ""; env.forEach((v, k) => { const x = W - (k + 0.5) / env.length * W, yy = y + RH - 4 - v * (RH * 0.5); d += (k ? "L" : "M") + x.toFixed(1) + " " + yy.toFixed(1); });
+    mk("path", { d, class: "lc-env" });
+    mk("text", { x: 8, y: y + 18, class: "lc-who" }, r.who);
+    // toucher une ligne : écouter ce mot chez cette personne
+    const hit = mk("rect", { x: 0, y, width: W, height: RH, fill: "transparent", class: "lc-hit" });
+    hit.addEventListener("click", () => play(r.buf, t0 - 0.12, t1 + 0.2));
+  });
+  const box = el("div", "lchart-box");
+  box.appendChild(el("div", "lc-h", "Lettre par lettre"));
+  box.appendChild(svg);
+  box.appendChild(el("p", "lc-note", "Chaque case est une lettre, sa largeur est le temps qu'elle dure dans le mot (de droite à gauche). La case colorée est la voyelle longue. Touche une ligne pour l'écouter."));
+  return box;
+}
+function refButtons(vi, it, res) {
+  const acts = el("div", "acts");
+  const both = el("button", "btn primary", "▶ Lui, puis toi"); both.onclick = () => playBoth(it, res);
+  const me = el("button", "btn", "▶ Toi"); me.onclick = () => playClip(it, res, "usr");
+  const main = el("button", "btn", "▶ " + (res.recName || "Récitateur")); main.onclick = () => playClip(it, res, "ref");
+  if (!res.usrBuf || !(it.usrW || it.usr)) { me.disabled = true; both.disabled = true; }
+  if (!res.refBuf) { main.disabled = true; both.disabled = true; }
+  acts.append(both, me, main);
+  for (const a of it.alts || []) {
+    const buf = bufs.get(a.key), seg = a.refW || (a.refL && [a.refL[0], a.refL[a.refL.length - 1]]); if (!buf || !seg) continue;
+    const b = el("button", "btn", "▶ " + recInfo(recIdOf(a.key)).short);
+    b.onclick = () => { const c = span(seg, 0); play(buf, c[0], c[1]); };
+    acts.appendChild(b);
+  }
+  return acts;
+}
 function card(vi, it, num, res) {
   const c = el("article", "card k-" + it.kind); c.id = "it-" + vi + "-" + it.mi + "-" + it.w;
   const top = el("div", "card-top"), left = el("div", "card-id");
@@ -830,15 +913,9 @@ function card(vi, it, num, res) {
   c.appendChild(el("p", "say", verdictLine(it)));
   const bt = beats(it, res); if (bt) c.appendChild(bt);
   if (it.kind !== "ok") { const fix = el("p", "fix"); fix.appendChild(el("strong", null, "Conseil : ")); fix.appendChild(document.createTextNode(advice(it))); c.appendChild(fix); }
+  const lc = letterChart(vi, it, res); if (lc) c.appendChild(lc);
   const why = el("p", "why", rule(it)[1]); c.appendChild(why);
-  if (it.ref || it.refW) {
-    const acts = el("div", "acts");
-    const b1 = el("button", "btn", "▶ " + (res.recName || "Récitateur")), b2 = el("button", "btn", "▶ Toi"), b3 = el("button", "btn primary", "▶ Lui, puis toi");
-    b1.onclick = () => playClip(it, res, "ref"); b2.onclick = () => playClip(it, res, "usr"); b3.onclick = () => playBoth(it, res);
-    if (!res.usrBuf || !(it.usrW || it.usr)) { b2.disabled = true; b3.disabled = true; }
-    if (!res.refBuf) { b1.disabled = true; b3.disabled = true; }
-    acts.append(b3, b1, b2); c.appendChild(acts);
-  }
+  if (it.ref || it.refW) c.appendChild(refButtons(vi, it, res));
   if (it.compared > 1 && it.kind !== "ok" && it.kind !== "diff") c.appendChild(el("p", "bar-note", `Écart confirmé avec chaque récitateur de comparaison, en tenant compte de ton rythme${store.get("voice", null) ? " et de ta voix" : ""}.`));
   return c;
 }
@@ -866,6 +943,31 @@ function legend() {
 function maddCounts(items) {
   const m = items.filter(i => i.type !== "diff" && i.kind !== "nf");
   return { all: m.length, ok: m.filter(i => i.kind === "ok").length };
+}
+function openWord(vi, wi) {
+  const V = S && S.v[vi]; if (!V) return;
+  const body = openSheet(`Verset ${V.n} · mot ${wi + 1}`);
+  const res = results[vi];
+  const its = res ? res.items.filter(it => it.w === wi && it.kind !== "nf") : [];
+  const bad = its.filter(isBad);
+  if (res && its.length) {
+    const order = res.items.filter(isBad);
+    (bad.length ? bad : its).forEach(it => body.appendChild(card(vi, it, bad.length ? order.indexOf(it) + 1 : "✓", res)));
+  } else if (live[vi] && live[vi].some(x => x.w === wi)) {
+    const x = live[vi].filter(q => q.w === wi).pop();
+    const it = { w: wi, type: x.type, kind: x.kind, syl: x.syl, ratio: x.ratio };
+    const c = el("article", "card k-" + x.kind);
+    const top = el("div", "card-top"), tt = el("div");
+    tt.appendChild(el("div", "verdict", headline(it))); tt.appendChild(el("div", "rule", rule(it)[0] + (x.syl ? " · " + disp(x.syl) : "")));
+    top.appendChild(tt); top.appendChild(el("div", "word", disp(V.w[wi][0]))); c.appendChild(top);
+    c.appendChild(el("p", "say", `Repéré pendant que tu récitais : environ ${String(Math.round(x.usrS * 10) / 10).replace(".", ",")} s, le récitateur ${String(Math.round(x.refS * 10) / 10).replace(".", ",")} s à ton rythme.`));
+    const fix = el("p", "fix"); fix.appendChild(el("strong", null, "Conseil : ")); fix.appendChild(document.createTextNode(advice(it))); c.appendChild(fix);
+    c.appendChild(el("p", "why", "Le détail lettre par lettre et l'écoute arrivent à la fin du verset, dès que tu fais une pause."));
+    body.appendChild(c);
+  } else {
+    body.appendChild(el("p", "empty", "Pas d'erreur repérée sur ce mot."));
+  }
+  if (res) { const b = el("button", "btn", "Voir tout le verset"); b.onclick = () => openVerse(vi); body.appendChild(b); }
 }
 function retryVerse(vi) {
   closeSheet();
@@ -1388,8 +1490,8 @@ function markRange() {
 function resetRange() {
   if (!H) return;
   for (let vi = Math.min(H.link, H.from); vi <= H.to; vi++) {
-    results[vi] = null; usrBufs[vi] = null;
-    (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff", "peek"); const s = w.querySelector("sup"); if (s) s.remove(); });
+    results[vi] = null; usrBufs[vi] = null; delete live[vi];
+    (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff", "peek", "live"); const s = w.querySelector("sup"); if (s) s.remove(); });
     if (veEls[vi]) veEls[vi].classList.remove("st-ok", "st-warn");
   }
   updateProg();
@@ -1464,7 +1566,7 @@ const asrReady = () => AS.state === "ready";
 const awCache = new Map(); // "sourate:verset" -> mots du verset tels que le modèle les connaît
 function asrInit() {
   if (AS.w) return;
-  try { AS.w = new Worker("reco.js?v=9", { type: "module" }); }
+  try { AS.w = new Worker("reco.js?v=10", { type: "module" }); }
   catch (e) { AS.state = "error"; AS.err = "ce navigateur ne permet pas la reconnaissance vocale"; asrUi(); return; }
   AS.state = "loading"; AS.loaded = 0; AS.total = 0; AS.step = ""; asrUi();
   // le son part directement du fil d'analyse vers la reconnaissance, sans passer par l'écran
@@ -1551,6 +1653,8 @@ $("pages").addEventListener("click", e => {
   if (ve) { const vi = +ve.dataset.v; if (results[vi]) openVerse(vi); else if (rec) worker.postMessage({ t: "goto", i: vi, w: 0 }); else selectVerse(vi); return; }
   const w = e.target.closest(".w");
   if (!w) return;
+  // mot marqué (erreur) : on montre ce qui ne va pas sur ce mot
+  if (/\bk-(court|long|diff)\b/.test(w.className) && !(H && H.step === 2 && !w.classList.contains("done"))) { openWord(+w.dataset.v, +w.dataset.w); return; }
   if (H && H.step === 2 && !w.classList.contains("done") && !w.classList.contains("on") && !w.classList.contains("peek") && inRange(+w.dataset.v)) {
     w.classList.add("peek"); H.hints.add(w.dataset.v + ":" + w.dataset.w);
     if (!rec) return;

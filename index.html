@@ -26,7 +26,7 @@
   --m-long:#8a2f6b; --m-long-soft:#f6e0ee;
   --m-diff:#b33a2e; --m-diff-soft:#f9dfdb;
   --m-dock:rgba(255,255,255,.88);
-  --m-f-ui:"Figtree",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --m-f-ui:"Figtree",system-ui,-apple-system,"Segoe UI","Rihal Quran",sans-serif;
   --m-f-ar:"Rihal Quran","Amiri Quran","Amiri","Scheherazade New","Traditional Arabic",serif;
   padding-top:env(safe-area-inset-top,0px);
 }
@@ -259,6 +259,25 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .suggest{display:block;max-width:600px;margin:0 auto 8px;width:100%;border:0;border-radius:12px;padding:10px 14px;background:var(--m-accent);color:#fff;font:700 14px var(--m-f-ui);cursor:pointer}
 @media (max-width:480px){.grid{grid-template-columns:1fr}.bar-row{grid-template-columns:64px 1fr 56px}}
 
+
+/* v10 : schéma lettre par lettre, erreurs en direct */
+.w.live .t{text-decoration:underline dotted 3px;text-underline-offset:.35em}
+.w.k-court,.w.k-long,.w.k-diff{cursor:pointer}
+.lchart-box{background:var(--m-bg);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}
+.lc-h{font-weight:800;font-size:13px;color:var(--m-muted);text-transform:uppercase;letter-spacing:.04em}
+.lchart{width:100%;height:auto;display:block}
+.lc-box{fill:var(--m-surface);stroke:var(--m-line);stroke-width:2}
+.lc-ref{fill:var(--m-accent-soft);stroke:var(--m-accent);stroke-width:3}
+.lc-usr{fill:var(--m-ok-soft);stroke:var(--m-ok);stroke-width:3}
+.lc-usr.lc-court{fill:var(--m-short-soft);stroke:var(--m-short)} .lc-usr.lc-long{fill:var(--m-long-soft);stroke:var(--m-long)} .lc-usr.lc-diff{fill:var(--m-diff-soft);stroke:var(--m-diff)}
+.lc-let{font-family:var(--m-f-ar);font-size:34px;fill:var(--m-ink)}
+.lc-let.lc-on{font-weight:700}
+.lc-dur{font:800 17px var(--m-f-ui);fill:var(--m-ink)}
+.lc-who{font:800 17px var(--m-f-ui);fill:var(--m-muted)}
+.lc-env{fill:none;stroke:var(--m-ink);stroke-opacity:.35;stroke-width:2.5;stroke-linejoin:round;pointer-events:none}
+.lc-hit{cursor:pointer}
+.lc-note{font-size:12px;color:var(--m-muted);margin:0}
+
 /* sens des versets */
 .bar-r{display:flex;align-items:center;gap:8px}
 .mean-btn{display:flex;align-items:center;gap:6px;border:1px solid var(--m-line);background:var(--m-surface);color:var(--m-ink);border-radius:12px;height:40px;padding:0 12px;font:700 14px var(--m-f-ui);cursor:pointer}
@@ -393,7 +412,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     </div>
   </div>
 </div>
-<script src="search.js?v=9"></script>
-<script src="app.js?v=9"></script>
+<script src="search.js?v=10"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

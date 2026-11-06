@@ -388,7 +388,7 @@ function prepareRef(x, madds, wordTimes, nWords, words) {
   const haraka = Math.min(22, Math.max(10, tab.length ? percentile(tab, 0.5) / 3 : 14));
   const ref = { F, mask, soft, segs, unit, targets, wt, nWords: nWords || wt.length, haraka };
   for (const t of targets) if ((t.w == null || t.w < 0) && t.seg) t.w = wordAt(ref, (t.seg[0] + t.seg[1]) / 2).w;
-  if (words && words.length) ref.lt = letterTimes(ref, words, targets);
+  if (words && words.length) { ref.lt = letterTimes(ref, words, targets); ref.words = words; }
   return ref;
 }
 
@@ -485,6 +485,19 @@ function analyzeFull(ref, usr, bias, from) {
     if (e == null) e = 2;
     it.exp = e; it.got = Math.max(0.5, Math.round(e * it.ratio * 2) / 2);
   }
+  // schéma lettre par lettre : bornes de chaque lettre du mot chez le récitateur, et chez l'élève via l'alignement
+  const nearU = f => { for (let d = 0; d < 10; d++) { const v = r2u.get(f + d) || r2u.get(f - d); if (v) return d && r2u.get(f - d) && !r2u.get(f + d) ? v[1] : v[0]; } return -1; };
+  for (const it of items) {
+    const B = ref.lt && ref.lt[it.w], word = ref.words && ref.words[it.w];
+    if (!B || !word || B[0] < A0) continue;
+    const U = B.map(b => nearU(Math.round(b)));
+    if (U.some(v => v < 0)) continue;
+    for (let k = 1; k < U.length; k++) U[k] = Math.max(U[k], U[k - 1]);
+    it.refL = B.map(v => Math.round(v)); it.usrL = U;
+    it.lets = letters(word.replace(/\u0622/g, "\u0627\u0653")).map(x => x.c + x.m);
+    const t = it.mi != null ? ref.targets[it.mi] : null;
+    if (t && t.li != null) it.li = t.li;
+  }
   items.sort((x, y) => (x.ref ? x.ref[0] : 1e9) - (y.ref ? y.ref[0] : 1e9));
   return { items, tempo: R };
 }
@@ -500,7 +513,9 @@ function combine(main, others) {
     }
     return true;
   }).map(it => {
-    if (it.mi == null || it.kind === "nf" || it.type === "gen") return it;
+    const alts = [];
+    for (const o of others) { const x = o.items.find(y => it.mi != null ? y.mi === it.mi : (y.type === it.type && y.w === it.w)); if (x && x.refL) alts.push({ key: o.key, refL: x.refL, refW: x.refW, li: x.li, tempo: o.tempo, kind: x.kind }); }
+    if (it.mi == null || it.kind === "nf" || it.type === "gen") return alts.length ? { ...it, alts } : it;
     const kinds = [it.kind];
     for (const o of others) { const x = o.items.find(y => y.mi === it.mi); if (x && x.kind !== "nf") kinds.push(x.kind); }
     let kind = it.kind;
@@ -508,7 +523,7 @@ function combine(main, others) {
     else if (kinds.every(k => k === "court")) kind = "court";
     else if (kinds.every(k => k === "long")) kind = "long";
     else kind = "ok";
-    return { ...it, kind, agree: kinds.filter(k => k === it.kind).length, compared: kinds.length };
+    return { ...it, kind, agree: kinds.filter(k => k === it.kind).length, compared: kinds.length, alts };
   });
   return out;
 }
@@ -557,8 +572,14 @@ function relock(ref, x) {
 
 // ===== Suivi en direct d'un verset =====
 function LiveTracker(ref, onEvent, profile, bias, levels) {
-  const TU = Object.assign({ stay: 0.5, skip2: 0.03, skip3: 0.18, adv: 3 }, (typeof self !== "undefined" && self.__TUNE) || {});
+  const TU = Object.assign({ stay: 0.5, skip2: 0.03, skip3: 0.18, adv: 3, stayHold: 0.5, cross: 0 }, (typeof self !== "undefined" && self.__TUNE) || {});
   const F = ref.F, a0 = F.a0, a1 = F.a1, n = a1 - a0 + 1;
+  // voyelles longues de la référence : rester dessus ne coûte presque rien (l'élève peut tenir plus longtemps)
+  const hold = new Uint8Array(n);
+  for (const t of ref.targets || []) if (t.seg) for (let f = t.seg[0] - 2; f <= t.seg[1] + 6; f++) if (f >= a0 && f <= a1) hold[f - a0] = 1;
+  // passage d'un mot au suivant : il faut un peu plus d'indices (évite de valider un mot sur une lettre qui se répète)
+  const wIdx = new Int16Array(n);
+  if (ref.wt && ref.wt.length) { let w = 0; for (let i = 0; i < n; i++) { const f = a0 + i; while (w < ref.wt.length - 1 && f >= ref.wt[w + 1][0]) w++; wIdx[i] = w; } }
   let prev = new Float32Array(n).fill(Infinity), cur = new Float32Array(n).fill(Infinity);
   let buf = new Float32Array(0), off = 0, total = 0;
   const fr = [], kAt = new Int32Array(n).fill(-1), chunks = [];
@@ -591,10 +612,11 @@ function LiveTracker(ref, onEvent, profile, bias, levels) {
       let best;
       if (j === 0) best = i <= 30 ? 0.05 * i : Infinity;
       else {
-        best = prev[i] + stay;
-        if (i > 0 && prev[i - 1] < best) best = prev[i - 1];
-        if (i > 1 && prev[i - 2] + TU.skip2 < best) best = prev[i - 2] + TU.skip2;
-        if (i > 2 && prev[i - 3] + TU.skip3 < best) best = prev[i - 3] + TU.skip3;
+        best = prev[i] + (hold[i] ? Math.min(stay, TU.stayHold) : stay);
+        const cx = TU.cross;
+        if (i > 0 && prev[i - 1] + (cx && wIdx[i - 1] !== wIdx[i] ? cx : 0) < best) best = prev[i - 1] + (cx && wIdx[i - 1] !== wIdx[i] ? cx : 0);
+        if (i > 1 && prev[i - 2] + TU.skip2 + (cx && wIdx[i - 2] !== wIdx[i] ? cx : 0) < best) best = prev[i - 2] + TU.skip2 + (cx && wIdx[i - 2] !== wIdx[i] ? cx : 0);
+        if (i > 2 && prev[i - 3] + TU.skip3 + (cx && wIdx[i - 3] !== wIdx[i] ? cx : 0) < best) best = prev[i - 3] + TU.skip3 + (cx && wIdx[i - 3] !== wIdx[i] ? cx : 0);
       }
       cur[i] = best + d;
     }

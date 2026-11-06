@@ -1,5 +1,5 @@
 // Rihal — tout le calcul en arrière-plan : l'écran reste fluide.
-importScripts("engine.js?v=9");
+importScripts("engine.js?v=10");
 const E = self.MiroirEngine, SR = E.SR;
 const refs = new Map(); // "récitateur|verset" -> référence préparée
 let S = null;           // séance d'enregistrement en cours
@@ -163,7 +163,7 @@ function onEv(i, ev) {
     postMessage({ t: "pos", i, w: ev.w, f: ev.wf, l: ev.l, lf: ev.lf, frac: ev.frac, back });
     S.hist.push([S.samplesIn, i, ev.w]); if (S.hist.length > 600) S.hist.splice(0, 100);
   }
-  else if (ev.type === "madd") postMessage({ t: "madd", i, kind: ev.kind, ratio: ev.ratio, w: ev.target.w, type: ev.target.type, syl: ev.target.syl });
+  else if (ev.type === "madd") postMessage({ t: "madd", i, kind: ev.kind, ratio: ev.ratio, w: ev.target.w, type: ev.target.type, syl: ev.target.syl, refS: ev.refS, usrS: ev.usrS });
 }
 
 // l'élève choisit lui-même où reprendre (mot touché, ou « recommencer le verset »)
@@ -449,7 +449,7 @@ function endVerse(advance, cut) {
       let res = E.analyzeFull(ref, x, S.bias, S.from);
       if (!res.empty) {
         const raws = res.items.filter(x => x.raw > 0.15 && x.raw < 4);
-        const others = S.from ? [] : (S.extra[i] || []).map(k => refs.get(k)).filter(Boolean).map(r => E.analyzeFull(r, x, S.bias, 0)).filter(r => !r.empty);
+        const others = S.from ? [] : (S.extra[i] || []).filter(k => refs.get(k)).map(k => Object.assign(E.analyzeFull(refs.get(k), x, S.bias, 0), { key: k })).filter(r => !r.empty);
         res = E.combine(res, others);
         const flagged = new Set(res.items.filter(x => x.kind === "court" || x.kind === "long").map(x => x.w));
         res.items = res.items.filter(x => !(x.kind === "diff" && flagged.has(x.w)));
