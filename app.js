@@ -25,7 +25,7 @@ const saveSettings = p => store.set("settings", { ...settings(), ...p });
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null, pendingStart = false;
-const worker = new Worker("worker.js?v=10");
+const worker = new Worker("worker.js?v=11");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -640,7 +640,7 @@ worker.onmessage = e => {
   switch (m.t) {
     case "verse": {
       if (!rec) return;
-      if (results[m.i] && !calibMode) clearVerseMarks(m.i); // il récite à nouveau ce verset : on repart de zéro
+      restoreStash(m.i);
       rec.vi = m.i;
       selectVerse(m.i, true);
       veEls.forEach(v => v && v.classList.remove("st-run"));
@@ -660,7 +660,7 @@ worker.onmessage = e => {
       setStatus(m.noise && m.noise.floor > -42 ? "Étape 2 sur 2 : récite Al-Fatiha puis Al-Kawthar. (Il y a un peu de bruit autour de toi.)" : "Étape 2 sur 2 : récite Al-Fatiha puis Al-Kawthar, calmement.", "ok");
       break;
     case "goto":
-      clearLight();
+      clearLight(); restoreStash(m.i);
       if (rec) rec.vi = m.i;
       if (m.asr) { selectVerse(m.i, true); setStatus(m.rep ? `Tu répètes le verset ${S.v[m.i].n} : je te suis.` : `Tu récites le verset ${S.v[m.i].n} : je te suis.`, "ok"); }
       else setStatus(m.w ? `Reprise au mot touché, verset ${S.v[m.i].n}.` : `On reprend le verset ${S.v[m.i].n} depuis le début.`, "ok");
@@ -705,7 +705,7 @@ worker.onmessage = e => {
       const res = m.res;
       res.refBuf = bufs.get(keyOf(m.i)); res.usrBuf = usrBufs[m.i];
       res.recName = recInfo(settings().rec).short;
-      results[m.i] = res;
+      results[m.i] = res; delete stash[m.i];
       markVerse(m.i);
       updateProg();
       const bad = res.items.filter(isBad).length;
@@ -735,7 +735,13 @@ const disp = t => (t || "").replace(/ٞ/g, "ࣱ");
 const wordText = (vi, w) => (S && S.v[vi] && S.v[vi].w[w]) ? disp(S.v[vi].w[w][0]) : "";
 // erreur repérée pendant la récitation : marquée tout de suite sur le mot (provisoire, confirmée à la fin du verset)
 const live = {};
+// verset récité à nouveau : l'ancienne correction est mise de côté (et revient si on l'a quitté par erreur)
+const stash = {};
+function restoreStash(except) {
+  for (const k of Object.keys(stash)) { const vi = +k; if (vi === except) continue; if (!results[vi]) { results[vi] = stash[k]; markVerse(vi); } delete stash[k]; }
+}
 function clearVerseMarks(vi) {
+  if (results[vi]) stash[vi] = results[vi];
   results[vi] = null; delete live[vi];
   (wordEls[vi] || []).forEach(w => { w.classList.remove("k-court", "k-long", "k-diff", "live"); const s = w.querySelector("sup"); if (s) s.remove(); });
   if (veEls[vi]) veEls[vi].classList.remove("st-ok", "st-warn");
@@ -898,15 +904,6 @@ function letterChart(vi, it, res) {
   const box = el("div", "lchart-box");
   box.appendChild(el("div", "lc-h", "Lettre par lettre"));
   box.appendChild(svg);
-  // en une phrase : la part du mot occupée par la voyelle longue, chez lui et chez toi
-  const share = r => { const B = r.B, k = r.li; if (k == null || k < 0 || k >= B.length - 1) return null; const t = B[B.length - 1] - B[0]; return t > 0 ? Math.round((B[k + 1] - B[k]) / t * 100) : null; };
-  const rr = rows.find(r => r.ref), ru = rows.find(r => !r.ref);
-  const a = rr && share(rr), b = ru && share(ru);
-  if (a != null && b != null && it.lets[it.li]) {
-    const lt = el("p", "lc-sum"); const bd = el("bdi", "lc-ar", disp(it.lets[it.li])); bd.dir = "rtl";
-    lt.append("La voyelle longue ", bd, ` prend ${a} % du mot chez ${rr.who}, et ${b} % chez toi.`);
-    box.appendChild(lt);
-  }
   box.appendChild(el("p", "lc-note", "Chaque case est une lettre, sa largeur est le temps qu'elle dure dans le mot (de droite à gauche). La case colorée est la voyelle longue. Touche une ligne pour l'écouter."));
   return box;
 }
@@ -926,6 +923,24 @@ function refButtons(vi, it, res) {
   }
   return acts;
 }
+// le mot, avec la lettre fautive en couleur (là où il faut allonger ou raccourcir)
+function wordWithLetter(vi, it) {
+  const box = el("div", "word");
+  if (!it.lets || it.li == null || !it.lets[it.li] || it.kind === "diff") { box.textContent = wordText(vi, it.w); return box; }
+  it.lets.forEach((l, k) => { const sp = el("span", k === it.li || k === it.li - 1 ? "wl-on k-" + it.kind : null, disp(l)); box.appendChild(sp); });
+  return box;
+}
+// comment le dire : la syllabe étirée, telle que tu l'as dite et telle qu'il faut la dire
+const stretch = (syl, n) => { const t = disp(syl || ""); if (t.length < 2) return t; const k = Math.max(0, Math.min(10, Math.round(n))); const cut = t.length - 1; return t.slice(0, cut) + "ـ".repeat(k) + t.slice(cut); };
+function howTo(it) {
+  if (!it.syl || it.exp == null || it.got == null || it.kind === "ok" || it.kind === "diff") return null;
+  const box = el("div", "howto");
+  const row = (lab, n, cls) => { const r = el("div", "ht-row " + cls); r.appendChild(el("span", "ht-lab", lab)); const a = el("bdi", "ht-ar", stretch(it.syl, (n - 1) * 2)); a.dir = "rtl"; r.appendChild(a); r.appendChild(el("span", "ht-n", tps(n))); return r; };
+  box.appendChild(el("div", "ht-h", "Comment le dire"));
+  box.appendChild(row("Tu as dit", it.got, "usr k-" + it.kind));
+  box.appendChild(row("À dire", it.exp, "ref"));
+  return box;
+}
 function card(vi, it, num, res) {
   const c = el("article", "card k-" + it.kind); c.id = "it-" + vi + "-" + it.mi + "-" + it.w;
   const top = el("div", "card-top"), left = el("div", "card-id");
@@ -934,10 +949,11 @@ function card(vi, it, num, res) {
   const [rn] = rule(it);
   const r = el("div", "rule", rn); if (it.syl) { r.appendChild(document.createTextNode(" · ")); const b = el("bdi", null, disp(it.syl)); b.dir = "rtl"; r.appendChild(b); }
   tt.appendChild(r); left.appendChild(tt); top.appendChild(left);
-  top.appendChild(el("div", "word", wordText(vi, it.w)));
+  top.appendChild(wordWithLetter(vi, it));
   c.appendChild(top);
   c.appendChild(el("p", "say", verdictLine(it)));
-  const bt = beats(it, res); if (bt) c.appendChild(bt);
+  const hw = howTo(it); if (hw) c.appendChild(hw);
+  else { const bt = beats(it, res); if (bt) c.appendChild(bt); }
   if (it.kind !== "ok") { const fix = el("p", "fix"); fix.appendChild(el("strong", null, "Conseil : ")); fix.appendChild(document.createTextNode(advice(it))); c.appendChild(fix); }
   const lc = letterChart(vi, it, res); if (lc) c.appendChild(lc);
   const why = el("p", "why", rule(it)[1]); c.appendChild(why);
@@ -1592,7 +1608,7 @@ const asrReady = () => AS.state === "ready";
 const awCache = new Map(); // "sourate:verset" -> mots du verset tels que le modèle les connaît
 function asrInit() {
   if (AS.w) return;
-  try { AS.w = new Worker("reco.js?v=10", { type: "module" }); }
+  try { AS.w = new Worker("reco.js?v=11", { type: "module" }); }
   catch (e) { AS.state = "error"; AS.err = "ce navigateur ne permet pas la reconnaissance vocale"; asrUi(); return; }
   AS.state = "loading"; AS.loaded = 0; AS.total = 0; AS.step = ""; asrUi();
   // le son part directement du fil d'analyse vers la reconnaissance, sans passer par l'écran

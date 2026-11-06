@@ -1,5 +1,5 @@
 // Rihal — tout le calcul en arrière-plan : l'écran reste fluide.
-importScripts("engine.js?v=10");
+importScripts("engine.js?v=11");
 const E = self.MiroirEngine, SR = E.SR;
 const refs = new Map(); // "récitateur|verset" -> référence préparée
 let S = null;           // séance d'enregistrement en cours
@@ -293,12 +293,18 @@ function asrPos(m) {
   // pour ne pas faire reculer la lumière sur une simple hésitation
   const backward = m.i < S.i || (m.i === S.i && h && h[1] === S.i && m.w < h[2] - 1);
   // cas typique : il vient de finir un verset et le répète aussitôt → on y retourne sans attendre
-  const quickRepeat = m.i === S.i - 1 && m.w <= 3 && S.verseAt != null && m.end - S.verseAt < 5 * SR && m.end > S.verseAt + 0.4 * SR;
+  const quickRepeat = m.i === S.i - 1 && m.w >= 1 && m.w <= 3 && S.verseAt != null && m.end - S.verseAt < 5 * SR && m.end > S.verseAt + 0.4 * SR;
   if (backward && !quickRepeat) {
-    const c = S.backClaim;
-    if (!c || c.i !== m.i || m.end - c.end > 1.6 * SR || m.w < c.w) { S.backClaim = { i: m.i, w: m.w, end: m.end }; dbg("retour à confirmer", m.i + ":" + m.w); return; }
+    // plus on recule loin, plus il faut de preuves : la reconnaissance doit le suivre sur plusieurs mots d'affilée
+    const far = m.i < S.i - 1, c = S.backClaim;
+    const needT = far ? 1.4 * SR : 0, needW = far ? 2 : 0;
+    if (!c || c.i !== m.i || m.end - c.last > 1.6 * SR || m.w < c.w) { S.backClaim = { i: m.i, w0: m.w, w: m.w, end: m.end, last: m.end }; dbg("retour à confirmer", m.i + ":" + m.w); return; }
+    c.w = m.w; c.last = m.end;
+    if (m.end - c.end < needT || m.w - c.w0 < needW) { dbg("retour encore à confirmer", m.i + ":" + m.w); return; }
   }
   S.backClaim = null;
+  // avant de quitter un verset bien avancé, on garde son analyse (rien de ce qu'il a récité n'est perdu)
+  if (m.i !== S.i && !quickRepeat && S.tracker && S.tracker.frac >= 0.4 && bufLen() > 2.5 * SR && m.i !== S.i + 1) endVerse(false);
   S.anchorAt = m.end;
   if (m.i === S.i) {
     reanchor(m.w, m.end, true, m.cf);

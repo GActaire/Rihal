@@ -280,6 +280,20 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .lc-sum{font-size:14.5px;font-weight:600;margin:0}
 .lc-ar{font-family:var(--m-f-ar);font-size:1.35em;line-height:1}
 
+
+/* v11 : la lettre précise et comment la dire */
+.word .wl-on{border-radius:6px}
+.word .wl-on.k-court{color:var(--m-short);background:var(--m-short-soft)}
+.word .wl-on.k-long{color:var(--m-long);background:var(--m-long-soft)}
+.howto{background:var(--m-bg);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+.ht-h{font-weight:800;font-size:13px;color:var(--m-muted);text-transform:uppercase;letter-spacing:.04em}
+.ht-row{display:grid;grid-template-columns:86px 1fr auto;align-items:center;gap:10px}
+.ht-lab{font-weight:700;font-size:13px;color:var(--m-muted)}
+.ht-ar{font-family:var(--m-f-ar);font-size:30px;line-height:1.7;text-align:right}
+.ht-row.usr.k-court .ht-ar{color:var(--m-short)} .ht-row.usr.k-long .ht-ar{color:var(--m-long)} .ht-row.ref .ht-ar{color:var(--m-accent)}
+.ht-n{font-weight:700;font-size:13px;font-variant-numeric:tabular-nums}
+.ht-tip{margin:2px 0 0;font-size:14px}
+
 /* sens des versets */
 .bar-r{display:flex;align-items:center;gap:8px}
 .mean-btn{display:flex;align-items:center;gap:6px;border:1px solid var(--m-line);background:var(--m-surface);color:var(--m-ink);border-radius:12px;height:40px;padding:0 12px;font:700 14px var(--m-f-ui);cursor:pointer}
@@ -414,7 +428,7 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
     </div>
   </div>
 </div>
-<script src="search.js?v=10"></script>
-<script src="app.js?v=10"></script>
+<script src="search.js?v=11"></script>
+<script src="app.js?v=11"></script>
 </body>
 </html>
