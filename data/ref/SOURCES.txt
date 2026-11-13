@@ -1,0 +1,12 @@
+Minutage mot à mot des récitateurs de comparaison ajoutés (Rihal v12) — trois bases ouvertes :
+
+1. quran-align (Collin Fair) — https://github.com/cpfair/quran-align — licence CC BY 4.0
+   alafasy/ : Mishary al-Afasy (EveryAyah, Alafasy_128kbps), données « release-2016-11-24 ».
+2. Quranic Universal Audio (QUD-Technologies / Wider Community) — https://github.com/QUD-Technologies/quranic-universal-audio — licence CC BY 4.0
+   basfar/ : Abdullah Basfar (fichiers par sourate de QuranicAudio), version v5.0.0.
+3. quran-word-timings (its3li) — https://github.com/its3li/quran-word-timings — licence CC0 1.0
+   luhaidan/ : Muhammad al-Luhaidan (fichiers par sourate de mp3quran.net).
+
+Format : { "u": fichier audio de la sourate (ou null : un fichier par verset sur EveryAyah),
+           "v": { "<verset>": [début ms, fin ms (dans le fichier de la sourate), [[mot, mot+1, début ms, fin ms] ...]] } }
+Les minutages des mots sont relatifs au début du verset ; les mots sont numérotés à partir de 0.

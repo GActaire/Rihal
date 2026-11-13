@@ -1,5 +1,5 @@
 // Rihal — tout le calcul en arrière-plan : l'écran reste fluide.
-importScripts("engine.js?v=11");
+importScripts("engine.js?v=12");
 const E = self.MiroirEngine, SR = E.SR;
 const refs = new Map(); // "récitateur|verset" -> référence préparée
 let S = null;           // séance d'enregistrement en cours
@@ -288,6 +288,7 @@ function asrPos(m) {
   }
   // fin du verset précédent entendue juste avant qu'on passe au suivant : résultat en retard, pas une reprise
   if (m.i === S.i - 1 && S.wc && m.w >= (S.wc[m.i] || 0) - 3 && m.end < (S.verseAt || 0) + 0.9 * SR) { dbg("retard ignoré", m.i + ":" + m.w); return; }
+  (S.asrLog = S.asrLog || []).push({ i: m.i, g: m.end }); if (S.asrLog.length > 400) S.asrLog.splice(0, 100);
   if (m.i !== S.i && !confirmOther(m)) { dbg("refusé", m.i + ":" + m.w, "le son ressemble plus au verset", S.i); return; }
   // retour en arrière (il répète un verset ou reprend plus haut) : on attend une 2e confirmation de la reconnaissance,
   // pour ne pas faire reculer la lumière sur une simple hésitation
@@ -304,7 +305,7 @@ function asrPos(m) {
   }
   S.backClaim = null;
   // avant de quitter un verset bien avancé, on garde son analyse (rien de ce qu'il a récité n'est perdu)
-  if (m.i !== S.i && !quickRepeat && S.tracker && S.tracker.frac >= 0.4 && bufLen() > 2.5 * SR && m.i !== S.i + 1) endVerse(false);
+  if (m.i < S.i && !quickRepeat && S.tracker && S.tracker.frac >= 0.4 && bufLen() > 2.5 * SR) endVerse(false);
   S.anchorAt = m.end;
   if (m.i === S.i) {
     reanchor(m.w, m.end, true, m.cf);
@@ -314,7 +315,7 @@ function asrPos(m) {
     let cut = m.ga != null ? Math.round(m.ga - vb - 0.12 * SR) : -1;
     if (cut < SR * 0.8 || cut > bufLen()) { const dur = (ref.wt[m.w][1] - ref.wt[0][0]) * 160 * 1.15; cut = Math.round(m.end - dur - vb); }
     // presque rien de ce verset-ci dans l'enregistrement en cours : on passe directement au suivant
-    if (cut < SR * 0.8) { jumpVerse(m.i, m.w, m.ga != null ? m.ga : m.end, m.ga != null); return; }
+    if (cut < SR * 0.8) { flushForward(m); jumpVerse(m.i, m.w, m.ga != null ? m.ga : m.end, m.ga != null); return; }
     endVerse(true, cut);
     postMessage({ t: "relock", i: S ? S.i : m.i, next: true, asr: true });
     if (S && S.i === m.i && S.tracker) reanchor(m.w, m.end, true, m.cf);
@@ -322,11 +323,29 @@ function asrPos(m) {
     // ailleurs dans la sourate (retour en arrière, verset sauté) : on repart de là
     // début du verset entendu (reprise du verset, ou verset sauté repéré tôt) : on prend tout depuis ce début
     const fromStart = m.ga != null && m.w <= 3 && m.end - m.ga < 6 * SR;
+    if (m.i > S.i) flushForward(m);
     jumpVerse(m.i, m.w, fromStart ? m.ga : m.end, fromStart);
   }
 }
 // La reconnaissance dit « verset suivant » alors que le suivi croit qu'il a repris ce verset depuis le début : deux versets
 // peuvent commencer par les mêmes mots (67:2 et 67:3), ou il répète le verset. On attend le 3e mot pour trancher.
+// Saut en avant (la reconnaissance est déjà au verset m.i) : les versets récités entre-temps (souvent des versets
+// courts enchaînés vite) sont découpés grâce aux positions entendues, et analysés chacun — aucun n'est oublié.
+function flushForward(m) {
+  if (!(m.i > S.i) || S.calib) return;
+  const vb = S.samplesIn - bufLen(), all = concat(S.u16), log = S.asrLog || [];
+  const firstOf = k => { const e = log.find(q => q.i === k && q.g >= vb); return e ? e.g : null; };
+  let start = vb;
+  for (let k = S.i; k < m.i; k++) {
+    let end = k + 1 === m.i ? (m.ga != null ? m.ga : firstOf(m.i)) : firstOf(k + 1);
+    if (end == null) { if (k === S.i) continue; break; }
+    if (k > S.i && firstOf(k) == null) break; // jamais entendu : vraiment sauté
+    const a = Math.max(0, Math.round(start - vb - 0.15 * SR)), z = Math.min(all.length, Math.round(end - vb - 0.05 * SR));
+    const enough = k === S.i ? (z - a > SR && (!S.tracker || S.tracker.frac >= 0.3)) : z - a > 0.8 * SR;
+    if (enough) { dbg("analyse avant saut", k, ((z - a) / SR).toFixed(1) + " s"); analyzeSeg(k, all.slice(a, z), k === S.i ? S.from : 0); }
+    start = end;
+  }
+}
 function confirmOther(m) {
   if (m.i !== S.i + 1 || !S.tracker) return true;
   return m.w >= 2 || S.tracker.frac >= 0.85;
@@ -454,17 +473,30 @@ function endVerse(advance, cut) {
     const k = whichVerse(u16, i);
     if (k !== i) { postMessage({ t: "skipped", from: i, to: k }); S.i = i = k; ref = refs.get(S.keys[k]); }
   }
+  analyzeSeg(i, u16, S.from);
+  S.u16 = carry16 ? [carry16] : []; S.native = carryNat ? [carryNat] : []; S.from = 0; S.pend = null;
+  S.verseAt = S.samplesIn - bufLen();
+  if (!advance) return;
+  S.i++;
+  if (!S.calib) S.located = false; // au début de chaque verset : vérifier qu'il n'en a pas sauté
+  if (S.i >= S.keys.length) finish();
+  else startTracker();
+}
+
+// analyse d'un verset récité (son à 16 kHz) : correction envoyée à l'écran
+function analyzeSeg(i, u16, from) {
+  const ref = refs.get(S.keys[i]);
   // pour réécouter : le son à 16 kHz, exactement celui qui a été analysé (les repères tombent juste)
   const play16 = u16.slice();
   postMessage({ t: "verseEnd", i, native: play16, rate: SR }, [play16.buffer]);
   if (ref && u16.length > SR * 0.5) {
     try {
       let x = u16, uOff = 0;
-      if (!S.from) { const cut = E.lastStart(ref, u16); if (cut > 0) { x = u16.subarray(cut); uOff = cut / SR; } }
-      let res = E.analyzeFull(ref, x, S.bias, S.from);
+      if (!from) { const cut = E.lastStart(ref, u16); if (cut > 0) { x = u16.subarray(cut); uOff = cut / SR; } }
+      let res = E.analyzeFull(ref, x, S.bias, from);
       if (!res.empty) {
         const raws = res.items.filter(x => x.raw > 0.15 && x.raw < 4);
-        const others = S.from ? [] : (S.extra[i] || []).filter(k => refs.get(k)).map(k => Object.assign(E.analyzeFull(refs.get(k), x, S.bias, 0), { key: k })).filter(r => !r.empty);
+        const others = from ? [] : (S.extra[i] || []).filter(k => refs.get(k)).map(k => Object.assign(E.analyzeFull(refs.get(k), x, S.bias, 0), { key: k })).filter(r => !r.empty);
         res = E.combine(res, others);
         const flagged = new Set(res.items.filter(x => x.kind === "court" || x.kind === "long").map(x => x.w));
         res.items = res.items.filter(x => !(x.kind === "diff" && flagged.has(x.w)));
@@ -475,13 +507,6 @@ function endVerse(advance, cut) {
       }
     } catch (err) {}
   }
-  S.u16 = carry16 ? [carry16] : []; S.native = carryNat ? [carryNat] : []; S.from = 0; S.pend = null;
-  S.verseAt = S.samplesIn - bufLen();
-  if (!advance) return;
-  S.i++;
-  if (!S.calib) S.located = false; // au début de chaque verset : vérifier qu'il n'en a pas sauté
-  if (S.i >= S.keys.length) finish();
-  else startTracker();
 }
 
 function finish() {

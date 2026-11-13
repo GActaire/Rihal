@@ -16,7 +16,11 @@ const RECITERS = [
   { id: 6, name: "Mahmoud Khalil al-Husary", short: "al-Husary", folder: "Husary_64kbps" },
   { id: 12, name: "al-Husary, version enseignement (lente)", short: "al-Husary lent", folder: "Husary_Muallim_128kbps" },
   { id: 9, name: "Muhammad Siddiq al-Minshawi (murattal)", short: "al-Minshawi", folder: "Minshawy_Murattal_128kbps" },
-  { id: 2, name: "Abdul Basit Abdus Samad (murattal)", short: "Abdul Basit", folder: "Abdul_Basit_Murattal_64kbps" }
+  { id: 2, name: "Abdul Basit Abdus Samad (murattal)", short: "Abdul Basit", folder: "Abdul_Basit_Murattal_64kbps" },
+  // récitateurs ajoutés depuis 3 bases ouvertes de minutage mot à mot (voir data/ref/SOURCES.txt)
+  { id: 101, name: "Mishary al-Afasy (base quran-align)", short: "al-Afasy", folder: "Alafasy_128kbps", ref: "alafasy" },
+  { id: 102, name: "Abdullah Basfar (base Quranic Universal Audio)", short: "Basfar", ref: "basfar", surah: true },
+  { id: 103, name: "Muhammad al-Luhaidan (base quran-word-timings)", short: "al-Luhaidan", ref: "luhaidan", surah: true }
 ];
 const recInfo = id => RECITERS.find(r => r.id === id) || RECITERS[0];
 const settings = () => ({ rec: 6, multi: true, asr: false, ...store.get("settings", {}) });
@@ -25,7 +29,7 @@ const saveSettings = p => store.set("settings", { ...settings(), ...p });
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null, pendingStart = false;
-const worker = new Worker("worker.js?v=11");
+const worker = new Worker("worker.js?v=12");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -122,6 +126,19 @@ async function ensureRec(rec) {
   S.recs = S.recs || {};
   if (S.recs[rec]) return S.recs[rec];
   S.recs[rec] = (async () => {
+    const info = recInfo(rec);
+    if (info.ref) {
+      for (const sid of S.sur) {
+        let d = null; try { const r = await fetch(`data/ref/${info.ref}/${sid}.json`); if (r.ok) d = await r.json(); } catch (e) {}
+        for (const V of S.v) if (+V.k.slice(0, 3) === sid) {
+          V.r = V.r || {};
+          const x = d && d.v[String(V.n)];
+          const segs = x ? x[2].filter(q => q[1] <= V.w.length) : [];
+          V.r[rec] = { s: segs, u: "", span: x && x[0] != null ? [x[0], x[1]] : null, su: d && d.u };
+        }
+      }
+      return;
+    }
     for (const sid of S.sur) {
       const d = await loadRec(sid, rec);
       for (const V of S.v) if (+V.k.slice(0, 3) === sid) {
@@ -145,6 +162,26 @@ async function getAudio(rec, k, url) {
     try { const r = await fetch(u, { mode: "cors" }); if (r.ok) { const b = await r.blob(); if (b.size > 1500) { dbPut(id, b); return b; } } } catch (e) {}
   }
   return null;
+}
+// fichier d'une sourate entière (bases par sourate) : téléchargé une fois, gardé sur l'appareil, décodé une fois
+const surahDec = new Map();
+async function surahSlice(rec, sid, url, span) {
+  const key = rec + ":" + sid;
+  if (!surahDec.has(key)) surahDec.set(key, (async () => {
+    const id = `as:${rec}:${sid}`;
+    let blob = await dbGet(id);
+    if (!blob) {
+      try { const r = await fetch(url, { mode: "cors" }); if (!r.ok) return null; const n = +r.headers.get("content-length") || 0; if (n > 30e6) return null; blob = await r.blob(); if (blob.size > 30e6) return null; dbPut(id, blob); } catch (e) { return null; }
+    }
+    return decode(blob);
+  })().catch(() => null));
+  const d = await surahDec.get(key); if (!d) { surahDec.delete(key); return null; }
+  const sr = d.buf.sampleRate, a = Math.max(0, Math.floor(span[0] / 1000 * sr)), z = Math.min(d.buf.length, Math.ceil(span[1] / 1000 * sr));
+  if (z - a < sr * 0.3) return null;
+  const c = audioCtx(), buf = c.createBuffer(d.buf.numberOfChannels, z - a, sr);
+  for (let ch = 0; ch < d.buf.numberOfChannels; ch++) buf.copyToChannel(d.buf.getChannelData(ch).subarray(a, z), ch);
+  const x16 = d.x16.slice(Math.floor(span[0] / 1000 * SR), Math.ceil(span[1] / 1000 * SR));
+  return { buf, x16 };
 }
 function audioCtx() { ctx = ctx || new (window.AudioContext || window.webkitAudioContext)(); return ctx; }
 async function decode(blob) {
@@ -188,8 +225,15 @@ function prepVerse(vi, rec) {
   const p = (async () => {
     await ensureRec(rec);
     const R = (V.r && V.r[rec]) || { s: [], u: "" };
-    const blob = await getAudio(rec, V.k, R.u); if (!blob) return null;
-    const { buf, x16 } = await decode(blob);
+    let buf, x16;
+    if (R.span && R.su) { // récitation enregistrée par sourate : on découpe le verset dans le fichier de la sourate
+      const sl = await surahSlice(rec, +V.k.slice(0, 3), R.su, R.span); if (!sl) return null;
+      ({ buf, x16 } = sl);
+    } else {
+      if (recInfo(rec).ref && !R.s.length) return null;
+      const blob = await getAudio(rec, V.k, R.u); if (!blob) return null;
+      ({ buf, x16 } = await decode(blob));
+    }
     bufs.set(key, buf);
     const copy = new Float32Array(x16);
     worker.postMessage({ t: "prep", key, x16: copy, words: V.w.map(x => x[0]), segs: R.s }, [copy.buffer]);
@@ -685,7 +729,7 @@ worker.onmessage = e => {
       const strong = (m.kind === "court" && m.ratio < 0.45) || (m.kind === "long" && m.ratio > 2.2);
       if (!strong || m.i !== rec.vi) return;
       const it = { type: m.type, kind: m.kind };
-      setStatus(`${m.kind === "court" ? "Trop court" : "Trop long"} : ${wordText(m.i, m.w)}. ${advice(it)} Touche le mot pour voir.`, m.kind);
+      setStatus(`${m.kind === "court" ? "À allonger (+)" : "À raccourcir (−)"} : ${wordText(m.i, m.w)}. ${advice(it)} Touche le mot pour voir.`, m.kind);
       break;
     }
     case "jump":
@@ -761,7 +805,7 @@ function markVerse(vi) {
     n++;
     const w = wordEls[vi][it.w]; if (!w) return;
     w.classList.add("k-" + it.kind);
-    if (!w.querySelector("sup")) w.appendChild(el("sup", null, String(n)));
+    if (!w.querySelector("sup")) w.appendChild(el("sup", null, SIGN[it.kind]));
   });
   const ve = veEls[vi];
   ve.classList.remove("st-ok", "st-warn"); ve.classList.add(n ? "st-warn" : "st-ok");
@@ -779,10 +823,12 @@ const RULE = {
 };
 const rule = it => RULE[it.type] || RULE.gen;
 function headline(it) {
-  if (it.kind === "diff") return "À revoir";
-  if (it.type === "extra") return "Allongé en trop";
-  return it.kind === "court" ? "Trop court" : it.kind === "long" ? "Trop long" : "Juste";
+  if (it.kind === "diff") return "Mot à revoir";
+  if (it.type === "extra") return "À raccourcir (voyelle courte)";
+  return it.kind === "court" ? "À allonger" : it.kind === "long" ? "À raccourcir" : "Juste";
 }
+// un seul signe, qui dit quoi faire : + allonger, − raccourcir, ? mot à revoir
+const SIGN = { court: "+", long: "−", diff: "?", ok: "✓" };
 const tps = n => (n % 1 ? String(n).replace(".", ",") : String(n)) + " temps";
 function verdictLine(it) {
   if (it.kind === "diff") return "Vérifie qu'aucun mot n'est sauté ou changé, puis réécoute le récitateur sur ce passage.";
@@ -944,7 +990,7 @@ function howTo(it) {
 function card(vi, it, num, res) {
   const c = el("article", "card k-" + it.kind); c.id = "it-" + vi + "-" + it.mi + "-" + it.w;
   const top = el("div", "card-top"), left = el("div", "card-id");
-  left.appendChild(el("span", "num", String(num)));
+  left.appendChild(el("span", "num", SIGN[it.kind] || String(num)));
   const tt = el("div"); tt.appendChild(el("div", "verdict", headline(it)));
   const [rn] = rule(it);
   const r = el("div", "rule", rn); if (it.syl) { r.appendChild(document.createTextNode(" · ")); const b = el("bdi", null, disp(it.syl)); b.dir = "rtl"; r.appendChild(b); }
@@ -952,13 +998,26 @@ function card(vi, it, num, res) {
   top.appendChild(wordWithLetter(vi, it));
   c.appendChild(top);
   c.appendChild(el("p", "say", verdictLine(it)));
+  // les deux écoutes, en premier : comment tu l'as dit, comment le dire
+  if (it.ref || it.refW) {
+    const two = el("div", "two-listen");
+    const me = el("button", "listen me"); me.appendChild(el("b", null, "▶ Comment tu l'as dit")); me.appendChild(el("span", null, "ta voix, ce mot seul"));
+    const ok = el("button", "listen good"); ok.appendChild(el("b", null, "▶ Comment le dire")); ok.appendChild(el("span", null, res.recName || "récitateur"));
+    me.onclick = () => playClip(it, res, "usr"); ok.onclick = () => playClip(it, res, "ref");
+    if (!res.usrBuf || !(it.usrW || it.usr)) me.disabled = true;
+    if (!res.refBuf) ok.disabled = true;
+    two.append(me, ok); c.appendChild(two);
+  }
   const hw = howTo(it); if (hw) c.appendChild(hw);
   else { const bt = beats(it, res); if (bt) c.appendChild(bt); }
   if (it.kind !== "ok") { const fix = el("p", "fix"); fix.appendChild(el("strong", null, "Conseil : ")); fix.appendChild(document.createTextNode(advice(it))); c.appendChild(fix); }
-  const lc = letterChart(vi, it, res); if (lc) c.appendChild(lc);
-  const why = el("p", "why", rule(it)[1]); c.appendChild(why);
-  if (it.ref || it.refW) c.appendChild(refButtons(vi, it, res));
-  if (it.compared > 1 && it.kind !== "ok" && it.kind !== "diff") c.appendChild(el("p", "bar-note", `Écart confirmé avec chaque récitateur de comparaison, en tenant compte de ton rythme${store.get("voice", null) ? " et de ta voix" : ""}.`));
+  // pour aller plus loin (replié)
+  const more = el("details", "more"); more.appendChild(el("summary", null, "Plus de détails : lettre par lettre, autres récitateurs"));
+  const lc = letterChart(vi, it, res); if (lc) more.appendChild(lc);
+  more.appendChild(el("p", "why", rule(it)[1]));
+  if (it.ref || it.refW) more.appendChild(refButtons(vi, it, res));
+  if (it.compared > 1 && it.kind !== "ok" && it.kind !== "diff") more.appendChild(el("p", "bar-note", `Écart confirmé avec chaque récitateur de comparaison, en tenant compte de ton rythme${store.get("voice", null) ? " et de ta voix" : ""}.`));
+  c.appendChild(more);
   return c;
 }
 
@@ -971,7 +1030,7 @@ function versePreview(vi, res, onWord) {
   S.v[vi].w.forEach((x, wi) => {
     const hit = byW.get(wi);
     const w = el("span", "vp-w" + (hit ? " k-" + hit[0].kind : okW.has(wi) ? " ok" : ""), disp(x[0]));
-    if (hit) { w.appendChild(el("sup", null, String(hit[1]))); w.onclick = () => onWord(hit[0]); }
+    if (hit) { w.appendChild(el("sup", null, SIGN[hit[0].kind])); w.onclick = () => onWord(hit[0]); }
     box.appendChild(w); box.appendChild(document.createTextNode(" "));
   });
   box.appendChild(el("span", "vp-end", S.v[vi].e ? disp(S.v[vi].e[0]) : String(S.v[vi].n)));
@@ -979,7 +1038,7 @@ function versePreview(vi, res, onWord) {
 }
 function legend() {
   const l = el("div", "legend");
-  [["ok", "juste"], ["court", "trop court"], ["long", "trop long"], ["diff", "à revoir"]].forEach(([k, t]) => { const i = el("span", "lg"); i.appendChild(el("i", "lg-" + k)); i.appendChild(document.createTextNode(t)); l.appendChild(i); });
+  [["ok", "✓", "juste"], ["court", "+", "à allonger"], ["long", "−", "à raccourcir"], ["diff", "?", "mot à revoir"]].forEach(([k, g, t]) => { const i = el("span", "lg"); i.appendChild(el("i", "lg-" + k, g)); i.appendChild(document.createTextNode(t)); l.appendChild(i); });
   return l;
 }
 function maddCounts(items) {
@@ -1608,7 +1667,7 @@ const asrReady = () => AS.state === "ready";
 const awCache = new Map(); // "sourate:verset" -> mots du verset tels que le modèle les connaît
 function asrInit() {
   if (AS.w) return;
-  try { AS.w = new Worker("reco.js?v=11", { type: "module" }); }
+  try { AS.w = new Worker("reco.js?v=12", { type: "module" }); }
   catch (e) { AS.state = "error"; AS.err = "ce navigateur ne permet pas la reconnaissance vocale"; asrUi(); return; }
   AS.state = "loading"; AS.loaded = 0; AS.total = 0; AS.step = ""; asrUi();
   // le son part directement du fil d'analyse vers la reconnaissance, sans passer par l'écran
