@@ -88,7 +88,7 @@ function begin() {
 function onPort(e) {
   const m = e.data;
   if (m.t === "begin") { begin(); return; }
-  if (m.t === "end") { on = false; q = []; qn = 0; if (VCUR) { diagVerse(VCUR, fed); VCUR = null; } return; }
+  if (m.t === "end") { on = false; q = []; qn = 0; if (VCUR) { diagVerse(VCUR, VCUR.gl); VCUR = null; } return; }
   if (!on || !sess || !m.x) return;
   let x = m.x;
   const expect = fed + qn;
@@ -153,7 +153,9 @@ function after() {
   lastSent = key;
   const ak = p.s + ":" + p.a;
   if (ak !== aySent) { p.aw = ayahWords(p.s, p.a); aySent = ak; }
-  if (!VCUR || VCUR.s !== p.s || VCUR.a !== p.a) { if (VCUR) diagVerse(VCUR, p.ga); VCUR = { s: p.s, a: p.a, ga: p.ga }; }
+  // fin d'un verset = dernier son entendu DANS ce verset (pas le début du suivant : le suivi peut sauter en avance)
+  if (!VCUR || VCUR.s !== p.s || VCUR.a !== p.a) { if (VCUR) diagVerse(VCUR, VCUR.gl); VCUR = { s: p.s, a: p.a, ga: p.ga, gl: p.g }; }
+  else VCUR.gl = Math.max(VCUR.gl, p.g);
   post({ t: "pos", ...p, at: fed });
 }
 
@@ -228,7 +230,7 @@ async function checkEnd(force) {
     if (!done) {
       const all = new Float32Array(CAL.n); let o = 0; for (const b of CAL.buf) { all.set(b, o); o += b.length; }
       const [s, a] = keyParts(key), units = VX.verseUnits(verseWords(s, a).map(z => z[1]));
-      const v = await VX.runVerse(calRunner(), all.subarray(Math.max(0, CAL.first - 6400)));
+      const v = await runCal(all.subarray(Math.max(0, CAL.first - 6400)));
       const h = VX.greedy(v.lp, v.T).ids.map(z => VX.GMAP[z]), r = Array.from(units.ids, z => VX.GMAP[z]);
       // part du verset entendue : 1 - (unités manquantes / unités attendues)
       const miss = Math.max(0, VX.editDistance(h, r) - Math.max(0, h.length - r.length));
@@ -240,6 +242,9 @@ async function checkEnd(force) {
 }
 const keyParts = k => k.split(":").map(Number);
 const verseWords = (s, a) => raw.surahs[s - 1].ayahs[a - 1].w;
+// un seul passage à la fois dans le modèle (vérification de fin de verset et analyse du verset)
+let runLock = Promise.resolve();
+const runCal = x => { const p = runLock.then(() => VX.runVerse(calRunner(), x)); runLock = p.catch(() => {}); return p; };
 function calRunner() { const r = sess.runner; return { io: r.io, reset: () => r.reset(), accept: rawAccept }; }
 async function calMsg(m) {
   try {
@@ -267,7 +272,7 @@ async function calMsg(m) {
 async function processVerse(key, x) {
   const [s, a] = keyParts(key), w = verseWords(s, a), units = VX.verseUnits(w.map(z => z[1]));
   const t0 = performance.now();
-  const v = await VX.runVerse(calRunner(), x);
+  const v = await runCal(x);
   if (sess) sess.reset();
   const ms = performance.now() - t0;
   const hd = VX.greedy(v.lp, v.T).ids.map(z => VX.GMAP[z]), rf = Array.from(units.ids, z => VX.GMAP[z]);
@@ -344,14 +349,19 @@ async function morpho() {
 const morphOf = (M, s, a, w) => { try { const x = M[s - 1][a - 1]; return x ? x[w] : null; } catch (_) { return null; } };
 async function diagVerse(V, gEnd) {
   try {
-    const g0 = V.ga - 3200, g1 = gEnd + 4800, from = Math.max(0, RING.n - RING.cap), idx = [];
+    const g0 = V.ga - 3200, g1 = gEnd + 8000, from = Math.max(0, RING.n - RING.cap), idx = [];
     for (let n = from; n < RING.n; n++) { const k = n % RING.cap; if (RING.g[k] >= g0 && RING.g[k] <= g1) idx.push(k); }
     if (idx.length < 10) return;
     const T = idx.length, lp = new Float32Array(T * 251);
     idx.forEach((k, t) => lp.set(RING.lp.subarray(k * 251, (k + 1) * 251), t * 251));
     const W = verseWords(V.s, V.a), units = VX.verseUnits(W.map(z => z[1]));
     const d = VX.diagnose(lp, T, units);
-    const words = d.words.map(z => ({ w: z.w, text: W[z.w] && W[z.w][2], changed: z.changed, heard: z.heardUnits, items: z.changed ? z.items : z.items.filter(i => !i.weak) })).filter(z => z.items.length);
+    // les « en trop » viennent surtout du verset voisin ou d'une reprise : on ne les signale pas
+    const words = d.words.map(z => ({ w: z.w, text: W[z.w] && W[z.w][2], changed: z.changed, heard: z.heardUnits, items: (z.changed ? z.items : z.items.filter(i => !i.weak)).filter(i => i.kind !== "ajout") })).filter(z => z.items.length);
+    // plusieurs mots manquants d'affilée : c'est un saut de passage (ou le suivi qui s'est avancé), pas une faute de mot
+    const allOm = z => z.items.every(i => i.kind === "oubli"), om = new Set(words.filter(allOm).map(z => z.w)), drop = new Set();
+    for (const w of om) { let a = w, b = w; while (om.has(a - 1)) a--; while (om.has(b + 1)) b++; if (b - a + 1 >= 3) for (let k = a - 1; k <= b + 1; k++) drop.add(k); }
+    if (drop.size) for (let i = words.length - 1; i >= 0; i--) if (drop.has(words[i].w)) words.splice(i, 1);
     if (!words.length) { post({ t: "diag", s: V.s, a: V.a, words: [] }); return; }
     // un autre mot du Coran ? (souvent : un verset qui ressemble)
     const L = lexicon(), M = words.some(z => z.changed) ? await morpho() : null;

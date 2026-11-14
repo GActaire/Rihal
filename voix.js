@@ -296,8 +296,15 @@ export function diagnose(lp, T, units, { margin = 2.3 } = {}) {
   const { ids: heard, frames } = greedy(lp, T), exp = units.ids, ops = alignUnits(heard, exp);
   const out = [];
   const conf = (f, a, b) => lp[f * NV + a] - lp[f * NV + b];
+  // on ne juge que la partie du verset réellement récitée (début tardif, arrêt avant la fin : pas des oublis)
+  const same = ([hi, ej]) => hi >= 0 && ej >= 0 && GMAP[heard[hi]] === GMAP[exp[ej]], pair = o => o && o[0] >= 0 && o[1] >= 0;
+  let k0 = ops.findIndex(same), k1 = -1;
+  for (let k = ops.length - 1; k >= 0; k--) if (same(ops[k])) { k1 = k; break; }
+  if (k0 > 0 && pair(ops[k0 - 1])) k0--; // une première syllabe changée juste avant reste jugée
+  if (k1 >= 0 && pair(ops[k1 + 1])) k1++;
+  if (k0 < 0) return { heard: heard.map(v => TOKENS[v]).join(""), words: [], units: heard.length };
   let lastWord = 0;
-  for (let k = 0; k < ops.length; k++) {
+  for (let k = k0; k <= k1; k++) {
     const [hi, ej] = ops[k];
     if (ej >= 0) lastWord = units.word[ej];
     if (hi >= 0 && ej >= 0) {
