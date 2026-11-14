@@ -29,7 +29,7 @@ const saveSettings = p => store.set("settings", { ...settings(), ...p });
 let chapters = [], S = null, cur = 0, ctx = null, playing = null, calibMode = false;
 let wordEls = [], veEls = [], results = [], usrBufs = [];
 let rec = null, listen = null, pendingStart = false;
-const worker = new Worker("worker.js?v=12");
+const worker = new Worker("worker.js?v=13");
 
 /* ---------- petite base locale (IndexedDB) ---------- */
 let dbp = null;
@@ -281,7 +281,7 @@ function renderHome() {
   const st = settings(), sel = $("recSel");
   if (!sel.options.length) RECITERS.forEach(r => { const o = el("option", null, r.name); o.value = r.id; sel.appendChild(o); });
   sel.value = st.rec; $("multi").checked = !!st.multi;
-  hifzCard(); asrUi();
+  hifzCard(); asrUi(); vxCard();
   const v = store.get("voice", null), cs = $("calibState");
   cs.textContent = v ? `Voix étalonnée le ${new Date(v.profile.date).toLocaleDateString("fr-FR")}` : "Pas encore étalonnée";
   $("calibBtn").textContent = v ? "Refaire" : "Étalonner";
@@ -304,7 +304,7 @@ async function openSurah(id, calib) {
   const parts = [];
   for (const sid of sur) { const t = await loadText(sid); if (!t) { $("pages").textContent = ""; $("pages").appendChild(el("p", "empty", "Impossible de charger le texte. Vérifie ta connexion internet.")); return; } parts.push(t); }
   S = { id: calibMode ? 0 : id, sur, c, v: parts.flatMap(t => t.v.map(V => ({ ...V }))), recs: {}, gl: parts[0].gl || "" };
-  results = new Array(S.v.length).fill(null); usrBufs = []; for (const k in live) delete live[k];
+  results = new Array(S.v.length).fill(null); usrBufs = []; for (const k in asrDiag) delete asrDiag[k]; for (const k in live) delete live[k];
   H = !calibMode && pendingH && pendingH.s === id ? pendingH : null; pendingH = null;
   if (H) { H.to = Math.min(H.to, S.v.length - 1); H.t0 = Date.now(); }
   const last = store.get("last", null);
@@ -750,6 +750,7 @@ worker.onmessage = e => {
       res.refBuf = bufs.get(keyOf(m.i)); res.usrBuf = usrBufs[m.i];
       res.recName = recInfo(settings().rec).short;
       results[m.i] = res; delete stash[m.i];
+      mergeAsr(m.i);
       markVerse(m.i);
       updateProg();
       const bad = res.items.filter(isBad).length;
@@ -819,10 +820,12 @@ const RULE = {
   munfasil: ["Madd séparé", "Voyelle longue en fin de mot, et hamza au début du mot suivant : 4 à 5 temps."],
   gen: ["Voyelle longue", "Cette voyelle se tient plus longtemps qu'une voyelle courte."],
   extra: ["Voyelle courte", "Ici la voyelle est courte (1 temps) : elle ne s'allonge pas."],
-  diff: ["Passage différent", "Ta voix ne correspond pas au texte à cet endroit : un mot sauté, changé, ou une hésitation."]
+  diff: ["Passage différent", "Ta voix ne correspond pas au texte à cet endroit : un mot sauté, changé, ou une hésitation."],
+  asr: ["Prononciation", "La reconnaissance a comparé chaque lettre et chaque voyelle que tu as dites au texte du Coran. Elle ne signale un écart que lorsqu'elle est nettement sûre d'elle."]
 };
 const rule = it => RULE[it.type] || RULE.gen;
 function headline(it) {
+  if (it.asr) return asrHead(it.asr);
   if (it.kind === "diff") return "Mot à revoir";
   if (it.type === "extra") return "À raccourcir (voyelle courte)";
   return it.kind === "court" ? "À allonger" : it.kind === "long" ? "À raccourcir" : "Juste";
@@ -831,6 +834,7 @@ function headline(it) {
 const SIGN = { court: "+", long: "−", diff: "?", ok: "✓" };
 const tps = n => (n % 1 ? String(n).replace(".", ",") : String(n)) + " temps";
 function verdictLine(it) {
+  if (it.asr) return asrLine(it.asr);
   if (it.kind === "diff") return "Vérifie qu'aucun mot n'est sauté ou changé, puis réécoute le récitateur sur ce passage.";
   if (it.exp == null) return it.kind === "court" ? "Tiens cette voyelle un peu plus longtemps." : it.kind === "long" ? "Tiens cette voyelle un peu moins longtemps." : "Bien tenu.";
   const want = it.type === "arid" ? `le récitateur en fait ${it.exp}` : it.type === "muttasil" || it.type === "munfasil" ? "il en faut 4 à 5" : `il en faut ${it.exp}`;
@@ -838,6 +842,7 @@ function verdictLine(it) {
   return `Tu l'as tenue environ ${tps(it.got)}, ${want}.`;
 }
 function advice(it) {
+  if (it.asr) return asrAdvice(it.asr);
   if (it.kind === "diff") return "Réécoute ce passage, puis récite-le en suivant le texte des yeux.";
   if (it.type === "extra") return "Cette voyelle doit rester courte : ne la tiens pas.";
   const c = it.kind === "court";
@@ -1008,7 +1013,7 @@ function card(vi, it, num, res) {
     if (!res.refBuf) ok.disabled = true;
     two.append(me, ok); c.appendChild(two);
   }
-  const hw = howTo(it); if (hw) c.appendChild(hw);
+  const hw = it.asr ? asrHowTo(it.asr) : howTo(it); if (hw) c.appendChild(hw);
   else { const bt = beats(it, res); if (bt) c.appendChild(bt); }
   if (it.kind !== "ok") { const fix = el("p", "fix"); fix.appendChild(el("strong", null, "Conseil : ")); fix.appendChild(document.createTextNode(advice(it))); c.appendChild(fix); }
   // pour aller plus loin (replié)
@@ -1667,7 +1672,7 @@ const asrReady = () => AS.state === "ready";
 const awCache = new Map(); // "sourate:verset" -> mots du verset tels que le modèle les connaît
 function asrInit() {
   if (AS.w) return;
-  try { AS.w = new Worker("reco.js?v=12", { type: "module" }); }
+  try { AS.w = new Worker("reco.js?v=13", { type: "module" }); }
   catch (e) { AS.state = "error"; AS.err = "ce navigateur ne permet pas la reconnaissance vocale"; asrUi(); return; }
   AS.state = "loading"; AS.loaded = 0; AS.total = 0; AS.step = ""; asrUi();
   // le son part directement du fil d'analyse vers la reconnaissance, sans passer par l'écran
@@ -1682,12 +1687,14 @@ function asrOff() { if (AS.w) AS.w.terminate(); AS.w = null; AS.state = "off"; w
 function recoHint(s, vi) { if (AS.w) AS.w.postMessage({ t: "hint", s: s || 0, a: (vi || 0) + 1 }); }
 function onReco(m) {
   if (m.t === "progress") { AS.loaded = m.loaded; AS.total = m.total; AS.step = m.step || ""; asrUi(); return; }
-  if (m.t === "ready") { AS.state = "ready"; asrUi(); return; }
+  if (m.t === "ready") { AS.state = "ready"; VX.voice = m.voice || null; asrUi(); vxCard(); if (!$("voix").hidden) renderVoix(); return; }
+  if (m.t && m.t.startsWith("cal")) { vxOnReco(m); return; }
   if (m.t === "error") { asrOff(); AS.state = "error"; AS.err = m.msg; asrUi(); return; }
   if (m.t === "perf") { AS.speed = m.x; asrUi(); return; }
   if (m.t === "slow") { if (rec) setStatus("Ta tablette a du mal à suivre la reconnaissance : je me recale sur le son récent.", "court"); return; }
   if (m.t === "fail") { if (rec && rec.scanning) scanFail("La reconnaissance vocale s'est arrêtée (" + m.msg + ")."); return; }
   if (m.aw && m.aw.length) awCache.set(m.s + ":" + m.a, m.aw);
+  if (m.t === "diag") { onDiag(m); return; }
   if (!rec) return;
   if (m.t === "loc") onLocated(m);
   else if (m.t === "pos") onRecoPos(m);
@@ -1735,12 +1742,13 @@ function updateAutoBtn() {
 function route() {
   logFree();
   const m = location.hash.match(/^#s(\d+)$/);
-  $("hifz").hidden = true;
+  $("hifz").hidden = true; $("voix").hidden = true; if (VX.on && location.hash !== "#voix") vxPause();
   if (m) openSurah(+m[1]);
   else if (location.hash === "#etalonnage") { pendingH = null; openSurah(1, true); }
   else {
     stopAll(); S = null; H = null; calibMode = false; $("surah").hidden = true; $("dock").hidden = true; closeSheet(); $("hifzBar").hidden = true;
     if (location.hash === "#hifz") { $("home").hidden = true; $("hifz").hidden = false; renderHifz(); }
+    else if (location.hash === "#voix") { $("home").hidden = true; $("voix").hidden = false; renderVoix(); }
     else { $("home").hidden = false; renderHome(); }
     window.scrollTo(0, 0);
   }
@@ -1783,5 +1791,258 @@ loadChapters().then(c => {
   if (!c) setTimeout(() => { const g = $("grid"); if (g) g.prepend(el("p", "empty", "Noms des sourates indisponibles hors ligne pour l'instant.")); }, 0);
   route();
 });
+/* ---------- voyelles, lettres, mots : ce que la reconnaissance a entendu ---------- */
+const asrDiag = {}; // indice du verset -> mots avec un écart sûr
+function onDiag(m) {
+  if (!S) return;
+  const vi = S.v.findIndex(V => V.k === pad3(m.s) + pad3(m.a)); if (vi < 0) return;
+  asrDiag[vi] = m.words;
+  if (results[vi]) { results[vi].asrDone = false; mergeAsr(vi); markVerse(vi); }
+}
+function mergeAsr(vi) {
+  const res = results[vi], d = asrDiag[vi];
+  if (!res || !d || res.asrDone) return;
+  res.asrDone = true;
+  res.items = res.items.filter(it => it.type !== "asr");
+  // la reconnaissance a écouté tout le verset : un « mot à revoir » qu'elle n'a pas entendu de travers était une fausse alerte
+  res.items = res.items.filter(it => !(it.kind === "diff" && !d.some(z => z.w === it.w)));
+  for (const z of d) {
+    const ex = res.items.find(it => it.w === z.w && it.kind === "diff");
+    if (ex) { ex.asr = z; continue; }
+    res.items.push({ w: z.w, kind: "diff", type: "asr", asr: z, mi: 1000 + z.w });
+  }
+  res.items.sort((a, b) => a.w - b.w);
+}
+const VNAME = { "َ": "fatha (a)", "ُ": "damma (ou)", "ِ": "kasra (i)", "": "soukoun (pas de voyelle)" };
+const syl = (letter, v) => letter + (v || "ْ");
+function asrHead(z) {
+  if (z.alt) return "Un autre mot";
+  if (z.items.every(it => it.kind === "oubli")) return "Mot oublié";
+  const it = z.items.find(i => !i.weak) || z.items[0];
+  return it.kind === "voyelle" ? "Voyelle changée" : it.kind === "lettre" ? "Lettre changée" : "Mot à revoir";
+}
+function asrLine(z) {
+  const om = z.items.filter(it => it.kind === "oubli").map(it => it.expected).join("");
+  if (z.items.every(it => it.kind === "oubli")) return `Je n'ai pas entendu ce mot : « ${z.text} ».`;
+  const parts = z.items.filter(it => !it.weak).slice(0, 3).map(it => it.kind === "voyelle" ? `sur la lettre ${it.letter}, tu as dit ${VNAME[it.to] || it.to} au lieu de ${VNAME[it.from] || it.from}` : it.kind === "lettre" ? `j'ai entendu « ${it.heard} » au lieu de « ${it.expected} »` : "");
+  if (om) parts.push(`il manque « ${om} »`);
+  let t = parts.filter(Boolean).join(" ; ");
+  t = t ? t[0].toUpperCase() + t.slice(1) + "." : "Ce mot ne correspond pas au texte.";
+  if (z.alt) t = `Tu as dit « ${z.alt.text} » au lieu de « ${z.text} ». ` + t;
+  return t;
+}
+function asrAdvice(z) {
+  if (z.alt) return `Ce mot que tu as dit existe ailleurs dans le Coran (${surName(z.alt.s)}, verset ${z.alt.a}) : attention à ne pas mélanger les deux passages. Relis le mot avec ses voyelles, puis réécoute le récitateur.`;
+  const it = z.items.find(i => !i.weak) || z.items[0];
+  if (it.kind === "voyelle") return `Regarde la voyelle au-dessus ou au-dessous du ${it.letter} : ${VNAME[it.from] || it.from}. Redis la syllabe lentement, puis le mot entier.`;
+  return "Réécoute ce mot, puis redis-le lentement en suivant le texte des yeux.";
+}
+// le changement de sens que cause le mot dit à la place (d'après l'analyse grammaticale du Quranic Arabic Corpus)
+const PRONOUN = { "1S": "je", "1P": "nous", "2MS": "tu (masc.)", "2FS": "tu (fém.)", "2D": "vous deux", "2MD": "vous deux", "2MP": "vous", "2FP": "vous (fém.)", "3MS": "il", "3FS": "elle", "3D": "eux deux", "3MD": "eux deux", "3FD": "elles deux", "3MP": "ils", "3FP": "elles" };
+const TENSE = { PERF: "accompli (passé)", IMPF: "inaccompli (présent)", IMPV: "impératif" };
+const CASEFR = { NOM: "nominatif (-u)", ACC: "accusatif (-a)", GEN: "génitif (-i)" };
+function morphDiff(a, b) { // a : mot dit, b : mot attendu (chaînes « racine|lemme|nature|traits|préfixes|suffixes »)
+  if (!a || !b) return [];
+  const A = a.split("|"), B = b.split("|"), ta = new Set(A[3].split(",")), tb = new Set(B[3].split(","));
+  const pick = (t, re) => [...t].find(x => re.test(x));
+  const out = [];
+  if (A[0] !== B[0]) out.push(A[0] ? `un autre mot (racine ${A[0].split("").join(" ")} au lieu de ${B[0] ? B[0].split("").join(" ") : "—"})` : "un autre mot");
+  else {
+    const pa = pick(ta, /^[123][MF]?[SDP]$/), pb = pick(tb, /^[123][MF]?[SDP]$/);
+    if (pa && pb && pa !== pb) out.push(`« ${PRONOUN[pa] || pa} » au lieu de « ${PRONOUN[pb] || pb} »`);
+    const xa = pick(ta, /^(PERF|IMPF|IMPV)$/), xb = pick(tb, /^(PERF|IMPF|IMPV)$/);
+    if (xa && xb && xa !== xb) out.push(`${TENSE[xa]} au lieu de ${TENSE[xb]}`);
+    if (ta.has("PASS") !== tb.has("PASS")) out.push(ta.has("PASS") ? "forme passive au lieu de l'active" : "forme active au lieu de la passive");
+    const ca = pick(ta, /^(NOM|ACC|GEN)$/), cb = pick(tb, /^(NOM|ACC|GEN)$/);
+    if (ca && cb && ca !== cb) out.push(`cas ${CASEFR[ca]} au lieu de ${CASEFR[cb]}`);
+    if (A[4] !== B[4]) out.push(A[4] ? `préfixe ${A[4]} ajouté ou changé` : `préfixe ${B[4]} oublié`);
+  }
+  return out;
+}
+function asrHowTo(z) {
+  const box = el("div", "howto");
+  box.appendChild(el("div", "ht-h", "Comment le dire"));
+  const row = (lab, txt, cls) => { const r = el("div", "ht-row " + cls); r.appendChild(el("span", "ht-lab", lab)); const a = el("bdi", "ht-ar", txt); a.dir = "rtl"; r.appendChild(a); return r; };
+  if (z.alt) { box.appendChild(row("Tu as dit", z.alt.text, "usr k-diff")); box.appendChild(row("À dire", z.text, "ref")); }
+  else z.items.slice(0, 3).forEach(it => {
+    if (it.kind === "voyelle") { box.appendChild(row("Tu as dit", syl(it.letter, it.to), "usr k-diff")); box.appendChild(row("À dire", syl(it.letter, it.from), "ref")); }
+    else if (it.kind === "lettre") { box.appendChild(row("Tu as dit", it.heard, "usr k-diff")); box.appendChild(row("À dire", it.expected, "ref")); }
+  });
+  if (z.alt) {
+    const md = morphDiff(z.alt.m, z.alt.m0);
+    if (md.length) box.appendChild(el("p", "bar-note", "Ce que ça change : " + md.join(" ; ") + "."));
+    box.appendChild(el("p", "bar-note", `Mot que tu as dit : ${surName(z.alt.s)}, verset ${z.alt.a}.`));
+  }
+  return box;
+}
+
+/* ---------- apprendre ma voix : la reconnaissance s'adapte à ta voix et à ton micro ---------- */
+// Tu récites ~10 min de versets choisis (toutes les lettres, voyelles, chadda, madd). Tout reste sur l'appareil.
+const VX = { list: null, voice: null, cal: [], i: 0, cap: null, on: false, wait: false, say: "", sayCls: "", lvl: 0, sp: false, bad: null, train: null, res: null };
+const VX_GOAL = 10; // minutes conseillées
+function vxSend(m, tr) { if (!AS.w) return false; AS.w.postMessage(m, tr || []); return true; }
+function vxMin() { return (VX.list || []).filter(v => v.ok).reduce((t, v) => t + v.dur, 0) / 60; }
+const pct = x => (x * 100).toFixed(1).replace(".", ",") + " %";
+function vxCard() {
+  const box = $("voixCard"); if (!box) return;
+  box.textContent = "";
+  const t = el("div");
+  t.appendChild(el("b", null, "Apprendre ma voix"));
+  const v = VX.voice, min = vxMin();
+  let sub = "Rihal apprend comment ta voix et ton micro sonnent, pour mieux te reconnaître (≈ 10 min, en plusieurs fois si tu veux).";
+  if (!asrReady()) sub = "Charge d'abord la reconnaissance automatique (ci-dessous), puis reviens ici.";
+  else if (v && v.date) sub = v.on ? `Reconnaissance adaptée à ta voix · erreurs ${pct(v.base)} → ${pct(v.after)} sur tes versets de contrôle` : `Apprentissage fait, mais il n'aidait pas assez sur tes versets de contrôle : désactivé.`;
+  else if (VX.list && VX.list.length) sub = `${min.toFixed(1).replace(".", ",")} min enregistrées sur ${VX_GOAL}.`;
+  t.appendChild(el("span", null, sub));
+  box.appendChild(t);
+  const b = el("button", "btn primary", v && v.date ? "Compléter" : VX.list && VX.list.length ? "Continuer" : "Commencer");
+  b.disabled = !asrReady();
+  b.onclick = () => { location.hash = "voix"; };
+  box.appendChild(b);
+  box.classList.toggle("done", !!(v && v.on));
+  if (asrReady() && VX.list === null) vxSend({ t: "calList" });
+}
+function vxOnReco(m) {
+  switch (m.t) {
+    case "calList": VX.list = m.verses; VX.voice = m.voice; VX.cal = m.cal; vxCard(); if (!$("voix").hidden) renderVoix(); break;
+    case "calLvl": VX.lvl = m.db; VX.sp = m.sp; vxLevel(); break;
+    case "calAuto": if (VX.on && !VX.wait) vxNext(); break;
+    case "calMore": if (VX.on && !VX.wait) { VX.say = "Continue le verset jusqu'au bout."; VX.sayCls = ""; const e = $("vxSay"); if (e) { e.textContent = VX.say; e.className = "vx-say"; } } break;
+    case "calVerse": vxVerseDone(m); break;
+    case "calProgress": VX.train = m; renderVoix(); break;
+    case "calDone": VX.train = null; VX.res = m; vxSend({ t: "calList" }); renderVoix(); break;
+    case "calZip": { const a = document.createElement("a"); a.href = URL.createObjectURL(m.zip); a.download = "rihal-ma-voix.zip"; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); break; }
+    case "calError": VX.say = "Problème : " + m.msg; VX.sayCls = "bad"; renderVoix(); break;
+  }
+}
+function vxTodo() { const done = new Set((VX.list || []).filter(v => v.ok).map(v => v.key)); return VX.cal.findIndex(c => !done.has(c.key)); }
+function renderVoix() {
+  const v = $("voix"); if (v.hidden) return;
+  v.textContent = "";
+  const bar = el("header", "bar");
+  const back = el("button", "icon-btn"); back.setAttribute("aria-label", "Accueil"); back.innerHTML = '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>'; back.onclick = () => { location.hash = ""; };
+  bar.appendChild(back); const tt = el("div", "bar-title"); tt.appendChild(el("span", "h-title", "Apprendre ma voix")); bar.appendChild(tt); bar.appendChild(el("span"));
+  v.appendChild(bar);
+  if (!asrReady()) { v.appendChild(el("p", "vx-intro", "La reconnaissance automatique n'est pas encore chargée. Reviens à l'accueil et charge-la d'abord.")); return; }
+  if (!VX.list) { v.appendChild(el("p", "vx-intro", "Chargement…")); vxSend({ t: "calList" }); return; }
+  v.appendChild(el("p", "vx-intro", "Récite chaque verset affiché, normalement, comme tu récites d'habitude. Quand tu t'arrêtes, Rihal passe tout seul au suivant. Tu peux faire une pause et revenir plus tard : rien n'est perdu. Tes enregistrements restent sur ta tablette."));
+  const min = vxMin(), n = VX.list.filter(x => x.ok).length;
+  const pg = el("div", "vx-prog"), fill = el("i"); fill.style.width = Math.min(100, min / VX_GOAL * 100) + "%"; pg.appendChild(fill); v.appendChild(pg);
+  const meta = el("div", "vx-meta"); meta.appendChild(el("span", null, `${min.toFixed(1).replace(".", ",")} min sur ${VX_GOAL}`)); meta.appendChild(el("span", null, `${n} / ${VX.cal.length} versets`)); v.appendChild(meta);
+  if (VX.i < 0 || VX.i >= VX.cal.length || (!VX.on && VX.list.some(x => x.ok && x.key === (VX.cal[VX.i] || {}).key))) VX.i = Math.max(0, vxTodo());
+  const c = VX.cal[VX.i];
+  if (c && vxTodo() >= 0 || VX.on) {
+    const card = el("div", "vx-verse" + (VX.on ? " rec" : ""));
+    const [s, a] = c.key.split(":").map(Number);
+    card.appendChild(el("div", "vx-ref", `${surName(s)} · verset ${a}`));
+    const ar = el("div", "vx-ar"); c.w.forEach((w, k) => { const sp = el("span", VX.bad && VX.bad.key === c.key && VX.bad.w.has(k) ? "bad" : null, w); ar.appendChild(sp); ar.appendChild(document.createTextNode(" ")); }); card.appendChild(ar);
+    const lv = el("div", "vx-lvl"); lv.id = "vxLvl"; lv.appendChild(el("i")); card.appendChild(lv);
+    const say = el("div", "vx-say " + VX.sayCls, VX.say); say.id = "vxSay"; card.appendChild(say);
+    v.appendChild(card);
+    const row = el("div", "vx-row");
+    const mic = el("button", "btn primary", VX.on ? "Pause" : n ? "Continuer" : "Commencer");
+    mic.onclick = () => VX.on ? vxPause() : vxStart();
+    row.appendChild(mic);
+    const skip = el("button", "btn", "Passer ce verset"); skip.onclick = () => vxSkip(); row.appendChild(skip);
+    v.appendChild(row);
+  } else v.appendChild(el("p", "vx-res", "Tous les versets de l'étalonnage sont enregistrés ✓"));
+  // apprentissage
+  if (VX.train) {
+    const r = el("div", "vx-res"); r.appendChild(el("b", null, "Rihal apprend ta voix…")); r.appendChild(el("p", null, `étape ${VX.train.step} sur ${VX.train.of} · environ une minute`));
+    const p2 = el("div", "vx-prog"), f2 = el("i"); f2.style.width = (VX.train.step / VX.train.of * 100) + "%"; p2.appendChild(f2); r.appendChild(p2); v.appendChild(r);
+  } else {
+    const can = min >= 2.5 && n >= 8;
+    const res = VX.res || (VX.voice && VX.voice.date ? { ok: true, on: VX.voice.on, base: VX.voice.base, after: VX.voice.after, n: VX.voice.n, min: VX.voice.min } : null);
+    if (res && res.ok) {
+      const r = el("div", "vx-res");
+      r.appendChild(el("b", null, res.on ? "Ta voix est apprise ✓" : "Pas d'amélioration mesurable"));
+      r.appendChild(el("p", null, `Sur tes versets de contrôle (jamais vus pendant l'apprentissage), les erreurs de reconnaissance passent de ${pct(res.base)} à ${pct(res.after)}.` + (res.on ? " La correction personnelle est activée pour toute la récitation." : " On garde donc la reconnaissance d'origine. Enregistre plus de versets, puis relance.")));
+      r.appendChild(el("p", null, `Appris sur ${res.n} versets (${res.min.toFixed(1).replace(".", ",")} min). La durée des madd et des ghunna n'est jamais adaptée : un madd trop court reste signalé.`));
+      if (VX.voice && VX.voice.date) { const tg = el("label", "check"); const cb = el("input"); cb.type = "checkbox"; cb.checked = !!VX.voice.on; cb.onchange = () => vxSend({ t: "calToggle", on: cb.checked }); tg.appendChild(cb); tg.appendChild(el("span", null, " Utiliser ma voix apprise")); r.appendChild(tg); }
+      v.appendChild(r);
+    } else if (res && !res.ok) v.appendChild(el("p", "vx-res", `Il faut au moins 2,5 minutes de versets réussis pour apprendre (tu en as ${min.toFixed(1).replace(".", ",")}).`));
+    const go = el("button", "btn" + (can ? " primary" : ""), VX.voice && VX.voice.date ? "Réapprendre avec tous mes versets" : "Apprendre ma voix maintenant");
+    go.disabled = !can || VX.on;
+    go.onclick = () => { VX.res = null; VX.train = { step: 0, of: 8 }; vxSend({ t: "calTrain" }); renderVoix(); };
+    const w = el("div", "vx-row"); w.appendChild(go); v.appendChild(w);
+    if (!can) v.appendChild(el("p", "vx-meta", "Possible dès 2,5 minutes ; le mieux est d'aller jusqu'à 10."));
+  }
+  // versets à refaire
+  const redo = VX.list.filter(x => !x.ok);
+  const lst = el("div", "vx-list");
+  if (redo.length) lst.appendChild(el("p", null, `${redo.length} verset${redo.length > 1 ? "s" : ""} mis de côté (bruit ou lecture différente du texte) : ${redo.map(x => x.key).join(", ")}. Ils ne servent pas à l'apprentissage.`));
+  v.appendChild(lst);
+  const sm = el("div", "vx-small");
+  const ex = el("button", "btn", "Exporter mes enregistrements (.zip)"); ex.disabled = !VX.list.length; ex.onclick = () => vxSend({ t: "calExport" }); sm.appendChild(ex);
+  const cl = el("button", "btn", "Tout effacer"); cl.disabled = !VX.list.length && !VX.voice; cl.onclick = () => { if (confirm("Effacer tous tes enregistrements d'étalonnage et la voix apprise ?")) { VX.res = null; vxSend({ t: "calClear" }); } }; sm.appendChild(cl);
+  v.appendChild(sm);
+  v.appendChild(el("p", "vx-meta", "L'export sert si tu veux garder tes enregistrements, ou les partager pour améliorer Rihal : un fichier .wav par verset et un petit rapport."));
+}
+function vxLevel() {
+  const lv = $("vxLvl"); if (!lv) return;
+  const x = Math.max(0, Math.min(1, (VX.lvl + 60) / 50));
+  lv.firstChild.style.width = (x * 100).toFixed(0) + "%"; lv.classList.toggle("sp", !!VX.sp);
+}
+async function vxStart() {
+  if (VX.on || !asrReady()) return;
+  const cap = await openMic(t => { VX.say = t; VX.sayCls = "bad"; renderVoix(); });
+  if (!cap) return;
+  VX.cap = cap; VX.on = true; VX.bad = null;
+  if (cap.port) vxSend({ t: "calMic", port: cap.port, rate: cap.rate }, [cap.port]);
+  else { vxSend({ t: "calMic", port: { set onmessage(_) {} }, rate: cap.rate }); cap.node.onaudioprocess = ev => { const d = new Float32Array(ev.inputBuffer.getChannelData(0)); AS.w && AS.w.postMessage({ t: "calAudio", data: d }, [d.buffer]); }; }
+  VX.i = Math.max(0, VX.i);
+  vxBegin();
+}
+function vxBegin() {
+  const c = VX.cal[VX.i]; if (!c) { vxPause(); return; }
+  VX.wait = false; VX.say = "Récite ce verset."; VX.sayCls = "";
+  vxSend({ t: "calStart", key: c.key });
+  renderVoix();
+}
+function vxNext() { // fin du verset (silence) : on l'envoie à l'analyse, et on enchaîne
+  if (!VX.on) return;
+  VX.wait = true; vxSend({ t: "calStop" });
+}
+function vxVerseDone(m) {
+  const c = VX.cal[VX.i];
+  if (m.empty) { VX.say = "Je n'ai rien entendu. Récite le verset affiché."; VX.sayCls = "bad"; if (VX.on) { vxSend({ t: "calStart", key: c.key }); VX.wait = false; } renderVoix(); return; }
+  if (!VX.list.some(x => x.key === m.key)) VX.list.push({ key: m.key, dur: m.dur, ok: m.ok, per: m.per });
+  else VX.list = VX.list.map(x => x.key === m.key ? { key: m.key, dur: m.dur, ok: m.ok, per: m.per } : x);
+  if (m.ok) {
+    VX.say = "✓ Verset enregistré."; VX.sayCls = "ok"; VX.bad = null;
+    const nx = vxTodo(); VX.i = nx < 0 ? VX.cal.length : nx;
+  } else {
+    const w = (m.words || []).filter(z => z.items.some(i => !i.weak)); VX.bad = { key: m.key, w: new Set(w.map(z => z.w)) };
+    const it = w.length && w[0].items.find(i => !i.weak);
+    VX.say = it ? `On recommence ce verset : sur « ${w[0].text} », ${issueText(it)}` : "On recommence ce verset : le son n'était pas assez clair (bruit, ou un autre passage ?).";
+    VX.sayCls = "bad";
+  }
+  vxCard();
+  if (VX.on && VX.i < VX.cal.length) { vxSend({ t: "calStart", key: VX.cal[VX.i].key }); VX.wait = false; renderVoix(); }
+  else { vxPause(); }
+}
+function vxSkip() {
+  const k = VX.cal[VX.i] && VX.cal[VX.i].key;
+  VX.i = (VX.i + 1) % VX.cal.length;
+  let g = 0; while (VX.list.some(x => x.ok && x.key === VX.cal[VX.i].key) && g++ < VX.cal.length) VX.i = (VX.i + 1) % VX.cal.length;
+  VX.bad = null; VX.say = ""; VX.sayCls = "";
+  if (VX.on) { vxSend({ t: "calCancel" }); vxBegin(); } else renderVoix();
+}
+function vxPause() {
+  if (VX.cap) { closeMic(VX.cap); VX.cap = null; }
+  if (VX.on) vxSend({ t: "calCancel" });
+  VX.on = false; VX.wait = false; renderVoix();
+}
+// une erreur précise, en mots simples
+const VOWEL_FR = { "َ": "a (fatha)", "ُ": "ou (damma)", "ِ": "i (kasra)", "": "sans voyelle (soukoun)" };
+function issueText(it) {
+  if (it.kind === "voyelle") return `sur la lettre ${it.letter}, j'ai entendu « ${VOWEL_FR[it.to] || it.to} » au lieu de « ${VOWEL_FR[it.from] || it.from} ».`;
+  if (it.kind === "lettre") return `j'ai entendu « ${it.heard} » au lieu de « ${it.expected} ».`;
+  if (it.kind === "oubli") return `il manque « ${it.expected} ».`;
+  if (it.kind === "ajout") return `j'ai entendu « ${it.heard} » en trop.`;
+  return "";
+}
+
+window.__vx = { VX, AS, pause: () => vxPause(), diag: () => asrDiag, bad: () => results.map(r => r && r.items.filter(isBad).map(i => i.w + ":" + (i.asr ? "asr-" + (i.asr.alt ? "mot" : i.asr.items[0].kind) : i.kind))) }; // (tests automatiques)
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 })();

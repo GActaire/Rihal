@@ -1,0 +1,6 @@
+Analyse grammaticale des mots (Rihal v13) — data/morpho.json
+
+Quranic Arabic Corpus, morphologie v0.4 (Kais Dukes, University of Leeds) — http://corpus.quran.com — licence GNU GPL
+dans la version corrigée de Mustafa (mustafa0x/quran-morphology) — https://github.com/mustafa0x/quran-morphology
+Conversion : un enregistrement par mot « racine|lemme|nature|traits|préfixes|suffixes », aligné sur le découpage
+en mots de Rihal. Les 4 versets découpés autrement (2:181, 8:6, 13:37, 37:130) n'ont pas d'analyse plutôt qu'une fausse.

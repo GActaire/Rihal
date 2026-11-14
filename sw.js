@@ -1,8 +1,8 @@
 // Rihal — fonctionne hors ligne une fois ouvert
-const CACHE = "rihal-v12";
+const CACHE = "rihal-v13";
 const MODELS = "rihal-models-v1"; // modèle de reconnaissance (géré par reco.js) + moteur onnxruntime
 const ORT = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.2/";
-const SHELL = ["./", "index.html", "app.js?v=12", "worker.js?v=12", "engine.js?v=12", "search.js?v=12", "reco.js?v=12", "manifest.json", "favicon.svg", "logo192.png", "logo512.png", "fonts/AmiriQuran.woff"];
+const SHELL = ["./", "index.html", "app.js?v=13", "worker.js?v=13", "engine.js?v=13", "search.js?v=13", "reco.js?v=13", "voix.js?v=13", "manifest.json", "favicon.svg", "logo192.png", "logo512.png", "fonts/AmiriQuran.woff"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener("activate", e => {
   // on garde le modèle ; l'ancien modèle (v7, transformers) et les anciennes versions sont supprimés pour libérer de la place

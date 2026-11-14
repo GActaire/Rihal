@@ -89,6 +89,30 @@ body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset
 .bar-prog{font-size:13px;font-weight:700;color:var(--m-accent);background:var(--m-accent-soft);border-radius:999px;padding:4px 10px;white-space:nowrap}
 .icon-btn{width:40px;height:40px;border-radius:12px;border:1px solid var(--m-line);background:var(--m-surface);color:var(--m-ink);display:grid;place-items:center;cursor:pointer}
 .icon-btn svg{width:22px;height:22px}
+
+/* apprendre ma voix */
+.vx-card{flex-wrap:wrap}
+.vx-card .vx-acts{display:flex;gap:8px;flex-wrap:wrap}
+.vx-intro{color:var(--m-muted);font-size:14px;margin:4px 0 14px}
+.vx-prog{height:8px;border-radius:999px;background:var(--m-line);overflow:hidden;margin:6px 0 4px}
+.vx-prog i{display:block;height:100%;background:var(--m-accent);border-radius:999px;transition:width .3s}
+.vx-meta{display:flex;justify-content:space-between;font-size:13px;color:var(--m-muted)}
+.vx-verse{margin:16px 0;border:1px solid var(--m-line);background:var(--m-page);border-radius:18px;padding:18px 16px 14px;text-align:center}
+.vx-verse.rec{border-color:var(--m-accent);box-shadow:0 0 0 3px var(--m-accent-soft)}
+.vx-ref{font-size:13px;font-weight:700;color:var(--m-accent);margin-bottom:6px}
+.vx-ar{font-family:var(--m-f-ar);font-size:30px;line-height:2;direction:rtl}
+.vx-ar span.bad{color:var(--m-diff);text-decoration:underline wavy;text-underline-offset:8px}
+.vx-lvl{height:6px;border-radius:999px;background:var(--m-line);overflow:hidden;margin-top:10px}
+.vx-lvl i{display:block;height:100%;width:0;background:var(--m-accent-2);transition:width .08s}
+.vx-lvl.sp i{background:var(--m-glow)}
+.vx-say{min-height:24px;font-size:14px;margin-top:8px;color:var(--m-muted)}
+.vx-say.ok{color:var(--m-ok)} .vx-say.bad{color:var(--m-diff)}
+.vx-row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:10px 0}
+.vx-res{border-radius:16px;padding:14px 16px;background:var(--m-accent-soft);margin:14px 0}
+.vx-res b{font-size:18px}
+.vx-list{font-size:13px;color:var(--m-muted);margin-top:18px}
+.vx-list p{margin:4px 0}
+.vx-small{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
 .calib-banner{border-radius:14px;padding:12px 16px;background:var(--m-accent-soft);color:var(--m-ink);font-weight:600;margin-bottom:12px}
 .pages{display:flex;flex-direction:column;gap:18px;padding-top:6px}
 .page{background:var(--m-page);border:1px solid var(--m-line);border-radius:18px;padding:22px clamp(14px,3vw,30px) 14px}
@@ -400,6 +424,7 @@ details.more[open]{display:flex;flex-direction:column;gap:10px}
       <div><b>Ma voix</b><span id="calibState">Pas encore étalonnée</span></div>
       <button id="calibBtn" class="btn primary">Étalonner</button>
     </div>
+    <div id="voixCard" class="calib vx-card"></div>
     <div id="asrCard" class="asr-card"></div>
     <div class="settings">
       <label class="field"><span>Récitateur de référence</span><select id="recSel"></select></label>
@@ -408,10 +433,11 @@ details.more[open]{display:flex;flex-direction:column;gap:10px}
     <button id="resume" class="resume" hidden></button>
     <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10.5 4a6.5 6.5 0 0 1 5.2 10.4l4.4 4.4-1.4 1.4-4.4-4.4A6.5 6.5 0 1 1 10.5 4Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z"/></svg><input id="q" type="search" placeholder="Chercher une sourate : nom, numéro…" autocomplete="off"></label>
     <div id="grid" class="grid"><p class="empty">Chargement des sourates…</p></div>
-    <p class="foot">Texte du Coran, minutage et mot à mot : quran.com. Audios : everyayah.com. Traduction du sens : Rachid Maach (QuranEnc.com). Police : Amiri Quran (licence OFL). Minutage des récitateurs ajoutés : quran-align, Quranic Universal Audio, quran-word-timings.</p>
+    <p class="foot">Texte du Coran, minutage et mot à mot : quran.com. Audios : everyayah.com. Traduction du sens : Rachid Maach (QuranEnc.com). Police : Amiri Quran (licence OFL). Minutage des récitateurs ajoutés : quran-align, Quranic Universal Audio, quran-word-timings. Analyse grammaticale des mots : Quranic Arabic Corpus (version corrigée mustafa0x, licence GPL).</p>
   </section>
 
   <section id="hifz" class="view" hidden></section>
+  <section id="voix" class="view" hidden></section>
 
   <section id="surah" class="view" hidden>
     <header class="bar">
@@ -443,7 +469,7 @@ details.more[open]{display:flex;flex-direction:column;gap:10px}
     </div>
   </div>
 </div>
-<script src="search.js?v=12"></script>
-<script src="app.js?v=12"></script>
+<script src="search.js?v=13"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>
